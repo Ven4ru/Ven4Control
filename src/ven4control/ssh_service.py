@@ -1,7 +1,9 @@
 import asyncio
 import base64
 import hashlib
+import os
 import socket
+import subprocess
 import time
 from pathlib import Path
 
@@ -36,7 +38,32 @@ def ensure_app_key(private_path: Path) -> tuple[Path, Path]:
         key = asyncssh.generate_private_key("ssh-ed25519")
         private_path.write_bytes(key.export_private_key("openssh"))
         public_path.write_bytes(key.export_public_key("openssh"))
+    secure_private_key_permissions(private_path)
     return private_path, public_path
+
+
+def secure_private_key_permissions(private_path: Path) -> None:
+    if os.name != "nt":
+        private_path.chmod(0o600)
+        return
+    username = os.environ.get("USERNAME")
+    if not username:
+        raise RuntimeError("Не удалось определить текущего пользователя Windows")
+    result = subprocess.run(
+        [
+            "icacls",
+            str(private_path),
+            "/inheritance:r",
+            "/grant:r",
+            f"{username}:(R)",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Не удалось защитить SSH-ключ: {result.stderr.strip()}")
 
 
 async def install_public_key(
