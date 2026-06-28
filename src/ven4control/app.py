@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal, Slot
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QCloseEvent
 from PySide6.QtWidgets import (
     QApplication, QHeaderView, QLabel, QMainWindow, QMessageBox, QPushButton,
     QTableWidget, QTableWidgetItem, QToolBar, QVBoxLayout, QWidget,
@@ -56,6 +56,7 @@ class MainWindow(QMainWindow):
         self.private_key, self.public_key = ensure_app_key(APP_KEY_PATH)
         self.devices: list[Device] = []
         self.pool = QThreadPool.globalInstance()
+        self.workers: set[Worker] = set()
 
         self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(
@@ -155,7 +156,7 @@ class MainWindow(QMainWindow):
             )
         )
         worker.signals.failed.connect(self.reload)
-        self.pool.start(worker)
+        self._start_worker(worker)
 
     def _confirm_key_install(
         self, device: Device, password: str, result: tuple[str, str]
@@ -186,7 +187,7 @@ class MainWindow(QMainWindow):
             lambda error: QMessageBox.warning(self, "Ключ не установлен", error)
         )
         worker.signals.failed.connect(self.reload)
-        self.pool.start(worker)
+        self._start_worker(worker)
 
     def _key_installed(self, device: Device, system: str, fingerprint: str) -> None:
         device.auth_type = "key"
@@ -207,7 +208,7 @@ class MainWindow(QMainWindow):
             worker.signals.failed.connect(
                 lambda error, r=row: self._set_status(r, (False, error))
             )
-            self.pool.start(worker)
+            self._start_worker(worker)
 
     def _set_status(self, row: int, result: tuple[bool, str]) -> None:
         online, detail = result
@@ -217,6 +218,12 @@ class MainWindow(QMainWindow):
         status.setForeground(Qt.GlobalColor.darkGreen if online else Qt.GlobalColor.red)
         self.table.setItem(row, 3, status)
         self.table.setItem(row, 4, QTableWidgetItem(detail if online else "—"))
+
+    def _start_worker(self, worker: Worker) -> None:
+        self.workers.add(worker)
+        worker.signals.finished.connect(lambda _=None, w=worker: self.workers.discard(w))
+        worker.signals.failed.connect(lambda _=None, w=worker: self.workers.discard(w))
+        self.pool.start(worker)
 
     def open_terminal(self, device: Device) -> None:
         args = ["ssh", "-p", str(device.port)]
@@ -250,6 +257,10 @@ class MainWindow(QMainWindow):
 
     def show_instructions(self) -> None:
         InstructionsDialog(self.public_key.read_text(encoding="utf-8"), self).exec()
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        self.pool.waitForDone(5000)
+        event.accept()
 
     def import_tailscale(self) -> None:
         try:
