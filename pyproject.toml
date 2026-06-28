@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ven4control"
-version = "0.1.0"
-description = "Локальный менеджер SSH-устройств"
+version = "1.0.0"
+description = "Менеджер OpenWrt-роутеров и Ubuntu-серверов"
 requires-python = ">=3.12"
 dependencies = [
     "PySide6>=6.8,<7",
