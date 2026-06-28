@@ -9,8 +9,8 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal, Slot
 from PySide6.QtGui import QAction, QCloseEvent
 from PySide6.QtWidgets import (
-    QApplication, QHeaderView, QLabel, QMainWindow, QMessageBox, QPushButton,
-    QTableWidget, QTableWidgetItem, QToolBar, QVBoxLayout, QWidget,
+    QApplication, QHBoxLayout, QHeaderView, QLabel, QMainWindow, QMessageBox,
+    QPushButton, QTableWidget, QTableWidgetItem, QToolBar, QVBoxLayout, QWidget,
 )
 
 from .credentials import CredentialStore
@@ -58,15 +58,35 @@ class MainWindow(QMainWindow):
         self.pool = QThreadPool.globalInstance()
         self.workers: set[Worker] = set()
 
-        self.table = QTableWidget(0, 6)
+        self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(
-            ["Устройство", "Адрес", "Пользователь", "Состояние", "Задержка", "Действия"]
+            ["Устройство", "Адрес", "Пользователь", "Состояние", "Задержка"]
         )
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.itemSelectionChanged.connect(self._update_selection)
+
+        action_panel = QWidget()
+        action_panel.setMinimumWidth(190)
+        action_panel.setMaximumWidth(230)
+        action_layout = QVBoxLayout(action_panel)
+        action_layout.addWidget(QLabel("Действия"))
+        self.selected_label = QLabel("Устройство не выбрано")
+        self.selected_label.setWordWrap(True)
+        action_layout.addWidget(self.selected_label)
+        self.terminal_button = QPushButton("Открыть терминал")
+        self.terminal_button.clicked.connect(self.open_selected_terminal)
+        self.forget_button = QPushButton("Удалить сохранённые данные")
+        self.forget_button.clicked.connect(self.forget_selected_credentials)
+        self.delete_button = QPushButton("Удалить устройство")
+        self.delete_button.clicked.connect(self.delete_selected_device)
+        action_layout.addWidget(self.terminal_button)
+        action_layout.addWidget(self.forget_button)
+        action_layout.addWidget(self.delete_button)
+        action_layout.addStretch()
 
         toolbar = QToolBar()
         self.addToolBar(toolbar)
@@ -86,8 +106,12 @@ class MainWindow(QMainWindow):
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.addWidget(QLabel("Ваши устройства"))
-        layout.addWidget(self.table)
+        content_layout = QHBoxLayout()
+        content_layout.addWidget(action_panel)
+        content_layout.addWidget(self.table, 1)
+        layout.addLayout(content_layout)
         self.setCentralWidget(container)
+        self._update_selection()
         self.reload()
 
     def reload(self) -> None:
@@ -99,19 +123,7 @@ class MainWindow(QMainWindow):
             self.table.setItem(row, 2, QTableWidgetItem(device.username))
             self.table.setItem(row, 3, QTableWidgetItem("Проверка…"))
             self.table.setItem(row, 4, QTableWidgetItem("—"))
-            actions = QWidget()
-            actions_layout = QVBoxLayout(actions)
-            actions_layout.setContentsMargins(2, 2, 2, 2)
-            terminal = QPushButton("Терминал")
-            terminal.clicked.connect(lambda _, d=device: self.open_terminal(d))
-            forget = QPushButton("Удалить данные")
-            forget.clicked.connect(lambda _, d=device: self.forget_credentials(d))
-            delete = QPushButton("Удалить устройство")
-            delete.clicked.connect(lambda _, d=device: self.delete_device(d))
-            actions_layout.addWidget(terminal)
-            actions_layout.addWidget(forget)
-            actions_layout.addWidget(delete)
-            self.table.setCellWidget(row, 5, actions)
+        self._update_selection()
         self.refresh_statuses()
 
     @Slot()
@@ -234,6 +246,38 @@ class MainWindow(QMainWindow):
             subprocess.Popen(["wt.exe", "new-tab", "--title", device.name, *args])
         except FileNotFoundError:
             subprocess.Popen(["powershell.exe", "-NoExit", "-Command", *args])
+
+    def selected_device(self) -> Device | None:
+        row = self.table.currentRow()
+        if 0 <= row < len(self.devices):
+            return self.devices[row]
+        return None
+
+    def _update_selection(self) -> None:
+        device = self.selected_device()
+        enabled = device is not None
+        self.selected_label.setText(
+            f"{device.name}\n{device.username}@{device.host}:{device.port}"
+            if device else "Устройство не выбрано"
+        )
+        self.terminal_button.setEnabled(enabled)
+        self.forget_button.setEnabled(enabled)
+        self.delete_button.setEnabled(enabled)
+
+    def open_selected_terminal(self) -> None:
+        device = self.selected_device()
+        if device:
+            self.open_terminal(device)
+
+    def forget_selected_credentials(self) -> None:
+        device = self.selected_device()
+        if device:
+            self.forget_credentials(device)
+
+    def delete_selected_device(self) -> None:
+        device = self.selected_device()
+        if device:
+            self.delete_device(device)
 
     def forget_credentials(self, device: Device) -> None:
         if device.id is None:
