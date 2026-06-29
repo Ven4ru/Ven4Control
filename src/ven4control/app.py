@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QPushButton, QTableWidget, QTableWidgetItem, QToolBar, QVBoxLayout, QWidget,
 )
 
+from ven4control.control_dialog import DeviceControlDialog
 from ven4control.credentials import CredentialStore
 from ven4control.dialogs import AddDeviceDialog, InstructionsDialog
 from ven4control.models import Device
@@ -28,6 +29,7 @@ from ven4control.storage import DeviceStorage
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Ven4Control"
 DB_PATH = APP_DIR / "devices.db"
 APP_KEY_PATH = APP_DIR / "ssh" / "id_ed25519"
+BACKUP_DIR = APP_DIR / "backups"
 
 
 def resource_path(name: str) -> Path:
@@ -89,10 +91,13 @@ class MainWindow(QMainWindow):
         action_layout.addWidget(self.selected_label)
         self.terminal_button = QPushButton("Открыть терминал")
         self.terminal_button.clicked.connect(self.open_selected_terminal)
+        self.control_button = QPushButton("Управление устройством")
+        self.control_button.clicked.connect(self.control_selected_device)
         self.forget_button = QPushButton("Удалить сохранённые данные")
         self.forget_button.clicked.connect(self.forget_selected_credentials)
         self.delete_button = QPushButton("Удалить устройство")
         self.delete_button.clicked.connect(self.delete_selected_device)
+        action_layout.addWidget(self.control_button)
         action_layout.addWidget(self.terminal_button)
         action_layout.addWidget(self.forget_button)
         action_layout.addWidget(self.delete_button)
@@ -271,6 +276,7 @@ class MainWindow(QMainWindow):
             if device else "Устройство не выбрано"
         )
         self.terminal_button.setEnabled(enabled)
+        self.control_button.setEnabled(enabled)
         self.forget_button.setEnabled(enabled)
         self.delete_button.setEnabled(enabled)
 
@@ -278,6 +284,22 @@ class MainWindow(QMainWindow):
         device = self.selected_device()
         if device:
             self.open_terminal(device)
+
+    def control_selected_device(self) -> None:
+        device = self.selected_device()
+        if not device:
+            return
+        credentials = (
+            self.credentials.load(device.id)
+            if device.id is not None and device.save_credentials
+            else {"password": "", "passphrase": ""}
+        )
+        DeviceControlDialog(
+            device,
+            credentials,
+            BACKUP_DIR,
+            self,
+        ).exec()
 
     def forget_selected_credentials(self) -> None:
         device = self.selected_device()
