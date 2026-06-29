@@ -7,22 +7,32 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal, Slot
-from PySide6.QtGui import QAction, QCloseEvent
+from PySide6.QtGui import QAction, QCloseEvent, QIcon
 from PySide6.QtWidgets import (
     QApplication, QHBoxLayout, QHeaderView, QLabel, QMainWindow, QMessageBox,
     QPushButton, QTableWidget, QTableWidgetItem, QToolBar, QVBoxLayout, QWidget,
 )
 
-from .credentials import CredentialStore
-from .dialogs import AddDeviceDialog, InstructionsDialog
-from .models import Device
-from .ssh_service import ensure_app_key, install_public_key, probe_device, tcp_check
-from .storage import DeviceStorage
+from ven4control.credentials import CredentialStore
+from ven4control.dialogs import AddDeviceDialog, InstructionsDialog
+from ven4control.models import Device
+from ven4control.ssh_service import (
+    ensure_app_key,
+    install_public_key,
+    probe_device,
+    tcp_check,
+)
+from ven4control.storage import DeviceStorage
 
 
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Ven4Control"
 DB_PATH = APP_DIR / "devices.db"
 APP_KEY_PATH = APP_DIR / "ssh" / "id_ed25519"
+
+
+def resource_path(name: str) -> Path:
+    bundle_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return bundle_dir / name
 
 
 class WorkerSignals(QObject):
@@ -356,6 +366,9 @@ class MainWindow(QMainWindow):
 def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("Ven4Control")
+    icon_path = resource_path("ven4control.ico")
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
     window = MainWindow()
     window.show()
     return app.exec()

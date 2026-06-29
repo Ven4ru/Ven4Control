@@ -187,6 +187,23 @@ ven4control
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
+## Автономный EXE
+
+Готовая сборка для Windows доступна на странице
+[Ven4Control 1.0.0](https://github.com/Ven4ru/Ven4Control/releases/tag/v1.0.0).
+Она содержит Python и все зависимости приложения, поэтому установка Python на
+целевом компьютере не требуется.
+
+Для самостоятельной сборки:
+
+```powershell
+.\build-exe.ps1
+```
+
+Результат сохраняется в `dist\Ven4Control.exe`. Для подключения к устройствам
+по-прежнему используется системный `ssh.exe`; Windows Terminal и Tailscale
+необязательны.
+
 ## Архитектура
 
 ```text
