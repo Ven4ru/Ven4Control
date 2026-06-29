@@ -4,6 +4,7 @@ import hashlib
 import os
 import socket
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -47,23 +48,59 @@ def secure_private_key_permissions(private_path: Path) -> None:
         private_path.chmod(0o600)
         return
     username = os.environ.get("USERNAME")
+    domain = os.environ.get("USERDOMAIN")
     if not username:
         raise RuntimeError("Не удалось определить текущего пользователя Windows")
-    result = subprocess.run(
+    principal = f"{domain}\\{username}" if domain else username
+    result = _apply_windows_private_key_acl(private_path, principal)
+    if result.returncode == 0:
+        return
+
+    # Старые версии оставляли пользователю только чтение, после чего повторное
+    # изменение DACL завершалось отказом в доступе. Создаём уже защищённый файл,
+    # переносим в него ключ и атомарно заменяем старый файл.
+    temporary_path: Path | None = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=private_path.parent,
+            prefix=f".{private_path.name}.",
+        )
+        os.close(descriptor)
+        temporary_path = Path(temporary_name)
+        recovery = _apply_windows_private_key_acl(temporary_path, principal)
+        if recovery.returncode != 0:
+            raise RuntimeError(_acl_error(recovery))
+        temporary_path.write_bytes(private_path.read_bytes())
+        os.replace(temporary_path, private_path)
+    except OSError as error:
+        raise RuntimeError(f"Не удалось защитить SSH-ключ: {error}") from error
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def _apply_windows_private_key_acl(
+    private_path: Path,
+    principal: str,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
         [
             "icacls",
             str(private_path),
             "/inheritance:r",
             "/grant:r",
-            f"{username}:(R)",
+            f"{principal}:(F)",
         ],
         capture_output=True,
         text=True,
-        encoding="utf-8",
+        encoding="oem",
         errors="replace",
     )
-    if result.returncode != 0:
-        raise RuntimeError(f"Не удалось защитить SSH-ключ: {result.stderr.strip()}")
+
+
+def _acl_error(result: subprocess.CompletedProcess[str]) -> str:
+    detail = (result.stderr or result.stdout).strip()
+    return f"Не удалось защитить SSH-ключ: {detail or 'icacls завершился с ошибкой'}"
 
 
 async def install_public_key(
