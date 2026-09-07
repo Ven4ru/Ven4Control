@@ -141,6 +141,9 @@ class MainWindow(QMainWindow):
         self._tray_hint_shown = False
         self.pool = QThreadPool.globalInstance()
         self.workers: set[Worker] = set()
+        # Устройства, для которых сейчас идёт проверка RDP: без этого набора
+        # обновление панели действий возвращало кнопке исходный текст.
+        self.rdp_checking: set[int] = set()
         # Счётчик перезагрузок списка: ответы старых проверок отбрасываются,
         # иначе состояние попадало в строку уже другого устройства.
         self.status_generation = 0
@@ -173,6 +176,10 @@ class MainWindow(QMainWindow):
         self.control_button.clicked.connect(self.control_selected_device)
         self.logging_button = QPushButton("Логировать в фоне")
         self.logging_button.clicked.connect(self.toggle_selected_logging)
+        self.rdp_check_button = QPushButton(rdp_check_label(None))
+        self.rdp_check_button.clicked.connect(self.check_selected_rdp)
+        self.rdp_button = QPushButton("🖥️ RDP")
+        self.rdp_button.clicked.connect(self.open_selected_rdp)
         self.forget_button = QPushButton("Удалить сохранённые данные")
         self.forget_button.clicked.connect(self.forget_selected_credentials)
         self.delete_button = QPushButton("Удалить устройство")
@@ -180,6 +187,8 @@ class MainWindow(QMainWindow):
         action_layout.addWidget(self.control_button)
         action_layout.addWidget(self.logging_button)
         action_layout.addWidget(self.terminal_button)
+        action_layout.addWidget(self.rdp_check_button)
+        action_layout.addWidget(self.rdp_button)
         action_layout.addWidget(self.forget_button)
         action_layout.addWidget(self.delete_button)
         action_layout.addStretch()
@@ -530,11 +539,67 @@ class MainWindow(QMainWindow):
         self.logging_button.setText(
             "Остановить логирование" if active else "Логировать в фоне"
         )
+        checking = device is not None and device.id in self.rdp_checking
+        self.rdp_check_button.setEnabled(enabled and not checking)
+        self.rdp_check_button.setText(
+            "Проверка RDP…" if checking else rdp_check_label(device)
+        )
+        # Кнопка запуска появляется только после успешной проверки: пока RDP
+        # не подтверждён, у устройства остаётся путь через SSH-терминал.
+        self.rdp_button.setVisible(device is not None and device.rdp_available)
+        self.rdp_button.setEnabled(enabled)
 
     def open_selected_terminal(self) -> None:
         device = self.selected_device()
         if device:
             self.open_terminal(device)
+
+    def open_selected_rdp(self) -> None:
+        device = self.selected_device()
+        if device:
+            self.open_rdp(device)
+
+    def check_selected_rdp(self) -> None:
+        device = self.selected_device()
+        if device is None or device.id is None:
+            return
+        if device.id in self.rdp_checking:
+            return
+        self.rdp_checking.add(device.id)
+        self._update_selection()
+        generation = self.status_generation
+        worker = Worker(tcp_check, device.host, device.rdp_port)
+        worker.signals.finished.connect(
+            lambda result, i=device.id, g=generation: self._set_rdp_result(
+                i, g, bool(result[0])
+            )
+        )
+        worker.signals.failed.connect(
+            lambda _error, i=device.id, g=generation: self._set_rdp_result(i, g, False)
+        )
+        self._start_worker(worker)
+
+    def _set_rdp_result(
+        self, device_id: int, generation: int, available: bool
+    ) -> None:
+        self.rdp_checking.discard(device_id)
+        # Список мог быть перезагружен: результат относился бы к другой записи.
+        if generation != self.status_generation:
+            return
+        row = self._row_of(device_id)
+        if row is None:
+            return
+        device = self.devices[row]
+        if apply_rdp_result(device, available):
+            try:
+                self.storage.save(device)
+            except Exception as error:
+                QMessageBox.warning(
+                    self,
+                    "Результат проверки не сохранён",
+                    f"RDP проверен, но запись в базу не обновлена: {error}",
+                )
+        self._update_selection()
 
     def device_credentials(self, device: Device, silent: bool = False) -> dict[str, str]:
         credentials = {"password": "", "passphrase": ""}
