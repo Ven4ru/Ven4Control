@@ -3,10 +3,11 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 from uuid import uuid4
 
 from PySide6.QtCore import QCoreApplication
-from PySide6.QtNetwork import QLocalServer
+from PySide6.QtNetwork import QAbstractSocket, QLocalServer
 
 import ven4control
 from ven4control.single_instance import SingleInstanceGuard
@@ -92,6 +93,35 @@ class SingleInstanceGuardTests(unittest.TestCase):
 
     def test_message_to_nobody_is_not_delivered(self) -> None:
         self.assertFalse(self._guard().notify_show())
+
+    def test_busy_name_sends_the_process_back_to_the_main_one(self) -> None:
+        """Главный процесс успел подняться между проверкой и listen().
+
+        Живой гонки здесь не устроить — нужна синхронизация двух процессов с
+        точностью до микросекунд, поэтому занятое имя изображается подменой.
+        """
+        guard = self._guard()
+        with mock.patch.object(QLocalServer, "listen", return_value=False), \
+                mock.patch.object(
+                    QLocalServer,
+                    "serverError",
+                    return_value=QAbstractSocket.SocketError.AddressInUseError,
+                ), \
+                mock.patch.object(guard, "_peer_exists", side_effect=[False, True]):
+            self.assertFalse(guard.try_acquire())
+
+    def test_other_listen_failures_do_not_stop_the_application(self) -> None:
+        guard = self._guard()
+        with mock.patch.object(QLocalServer, "listen", return_value=False), \
+                mock.patch.object(
+                    QLocalServer,
+                    "serverError",
+                    return_value=(
+                        QAbstractSocket.SocketError.SocketAccessError
+                    ),
+                ), \
+                mock.patch.object(guard, "_peer_exists", return_value=False):
+            self.assertTrue(guard.try_acquire())
 
     def test_abandoned_socket_does_not_block_startup(self) -> None:
         """Аварийно завершённый процесс оставляет имя занятым."""
