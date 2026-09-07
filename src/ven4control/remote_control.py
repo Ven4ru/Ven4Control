@@ -50,12 +50,19 @@ uptime -p 2>/dev/null || awk '{printf "%.1f hours\n", $1/3600}' /proc/uptime
 # который служит оболочкой по умолчанию во встроенном OpenSSH Server Windows.
 # В POSIX-оболочке этот текст не разбирается и завершается ненулевым кодом,
 # поэтому проба безопасна для роутеров и Linux-серверов.
+#
+# Описание системы намеренно не через Get-CimInstance/Get-WmiObject: живая
+# проверка на реальном OpenSSH Server Windows показала, что CIM/WMI-запрос в
+# неинтерактивном exec-канале SSH не просто падает, а рвёт всё соединение
+# целиком (exit_status=None, пустой вывод) — тогда и POSIX-проба на том же
+# соединении отваливается с «SSH connection closed», а не честным отказом.
+# [System.Environment]::OSVersion.Version не трогает CIM/WMI вообще и не
+# воспроизводит эту проблему; описание менее «человеческое» ("Windows
+# 10.0.26200"), но не ценой падения всего определения платформы.
 WINDOWS_PLATFORM_COMMAND = (
     "if ($null -eq $PSVersionTable) { exit 1 }; "
     "Write-Output 'windows'; "
-    "$c = (Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue).Caption; "
-    "if (-not $c) { $c = 'Windows ' + [System.Environment]::OSVersion.Version }; "
-    "Write-Output $c"
+    "Write-Output ('Windows ' + [System.Environment]::OSVersion.Version)"
 )
 
 # Проба POSIX: разделяет OpenWrt и остальной Linux.
