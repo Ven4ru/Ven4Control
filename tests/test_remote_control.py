@@ -1,13 +1,113 @@
+import asyncio
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
+from ven4control.models import Device
 from ven4control.remote_control import (
     MAX_LOG_LINES,
     MIN_LOG_LINES,
     _first_health_message,
     build_backup_command,
     build_log_command,
+    check_rdp,
+    detect_platform,
+    enable_rdp,
+    is_rdp_enabled,
+    parse_rdp_state,
     parse_systemd_services,
 )
+
+
+# Ответ PowerShell-пробы на настоящей Windows-машине.
+WINDOWS_ANSWER = "windows\nMicrosoft Windows 11 Pro\n"
+
+# POSIX-оболочка не разбирает текст пробы и завершается ненулевым кодом.
+SHELL_SYNTAX_ERROR = ("", 2)
+
+
+class FakeConnection:
+    """SSH-соединение для тестов: отвечает по подстроке в команде.
+
+    Позволяет проверять команды и разбор ответов без настоящего SSH.
+    """
+
+    def __init__(self, replies: list[tuple[str, str, int]] | None = None) -> None:
+        # Каждая запись: подстрока команды, stdout, код возврата.
+        self.replies = list(replies or [])
+        self.commands: list[str] = []
+        self.closed = False
+
+    async def run(self, command: str, check: bool = False, timeout: int = 60):
+        self.commands.append(command)
+        for marker, stdout, status in self.replies:
+            if marker in command:
+                return SimpleNamespace(stdout=stdout, stderr="", exit_status=status)
+        return SimpleNamespace(stdout="", stderr="команда не найдена", exit_status=127)
+
+    def close(self) -> None:
+        self.closed = True
+
+    async def wait_closed(self) -> None:
+        return None
+
+
+def windows_connection(*extra: tuple[str, str, int]) -> FakeConnection:
+    return FakeConnection([("$PSVersionTable", WINDOWS_ANSWER, 0), *extra])
+
+
+def openwrt_connection(*extra: tuple[str, str, int]) -> FakeConnection:
+    return FakeConnection(
+        [
+            ("$PSVersionTable", *SHELL_SYNTAX_ERROR),
+            ("openwrt_release", "openwrt\nOpenWrt 23.05.5\n", 0),
+            *extra,
+        ]
+    )
+
+
+class DetectPlatformTests(unittest.TestCase):
+    def test_powershell_device_is_detected_as_windows(self) -> None:
+        connection = windows_connection()
+        platform, description = asyncio.run(detect_platform(connection))
+        self.assertEqual("windows", platform)
+        self.assertEqual("Microsoft Windows 11 Pro", description)
+
+    def test_powershell_probe_goes_first_and_posix_stays_a_fallback(self) -> None:
+        """POSIX-команда в PowerShell не выполняется, поэтому проба первая."""
+        connection = openwrt_connection()
+        platform, description = asyncio.run(detect_platform(connection))
+        self.assertEqual("openwrt", platform)
+        self.assertEqual("OpenWrt 23.05.5", description)
+        self.assertIn("$PSVersionTable", connection.commands[0])
+        self.assertIn("openwrt_release", connection.commands[1])
+
+    def test_windows_device_is_not_asked_posix_questions(self) -> None:
+        connection = windows_connection()
+        asyncio.run(detect_platform(connection))
+        self.assertEqual(1, len(connection.commands))
+        self.assertNotIn("openwrt_release", connection.commands[0])
+
+    def test_foreign_answer_with_zero_code_is_ignored(self) -> None:
+        """Оболочка могла проглотить текст пробы и вернуть нулевой код."""
+        connection = FakeConnection(
+            [
+                ("$PSVersionTable", "мусор\n", 0),
+                ("openwrt_release", "linux\nUbuntu 24.04\n", 0),
+            ]
+        )
+        self.assertEqual(("linux", "Ubuntu 24.04"), asyncio.run(detect_platform(connection)))
+
+    def test_windows_without_description_keeps_platform(self) -> None:
+        connection = FakeConnection([("$PSVersionTable", "windows\n", 0)])
+        self.assertEqual(("windows", "Windows"), asyncio.run(detect_platform(connection)))
+
+    def test_empty_posix_answer_is_reported(self) -> None:
+        connection = FakeConnection(
+            [("$PSVersionTable", *SHELL_SYNTAX_ERROR), ("openwrt_release", "", 0)]
+        )
+        with self.assertRaises(RuntimeError):
+            asyncio.run(detect_platform(connection))
 
 
 class LogCommandTests(unittest.TestCase):
@@ -39,6 +139,133 @@ class LogCommandTests(unittest.TestCase):
     def test_line_count_is_clamped(self) -> None:
         self.assertIn(f"-n {MIN_LOG_LINES}", build_log_command("system", 1))
         self.assertIn(f"-n {MAX_LOG_LINES}", build_log_command("system", 99999))
+
+
+def device() -> Device:
+    return Device(
+        1, "ПК", "100.64.0.7", 22, "user",
+        auth_type="key", key_path="C:/keys/id_ed25519",
+        fingerprint="SHA256:pc",
+    )
+
+
+def patched_connect(connection: FakeConnection):
+    """Подменяет установку SSH-соединения заранее готовым ответчиком."""
+
+    async def connect(_device, _credentials):
+        return connection
+
+    return patch("ven4control.remote_control._connect", connect)
+
+
+class RdpStateParsingTests(unittest.TestCase):
+    def test_zero_means_rdp_is_allowed(self) -> None:
+        self.assertTrue(parse_rdp_state("RDP=0\n"))
+
+    def test_nonzero_means_rdp_is_denied(self) -> None:
+        self.assertFalse(parse_rdp_state("RDP=1\n"))
+
+    def test_marker_is_found_among_other_output(self) -> None:
+        self.assertTrue(parse_rdp_state("предупреждение\nRDP=0\nхвост\n"))
+
+    def test_missing_or_broken_value_is_denied(self) -> None:
+        self.assertFalse(parse_rdp_state(""))
+        self.assertFalse(parse_rdp_state("RDP=нет\n"))
+        self.assertFalse(parse_rdp_state("значения нет\n"))
+
+
+class RdpCheckTests(unittest.TestCase):
+    def test_enabled_windows_device_is_reported(self) -> None:
+        connection = windows_connection(("fDenyTSConnections", "RDP=0\n", 0))
+        with patched_connect(connection):
+            status = asyncio.run(check_rdp(device(), {}))
+        self.assertTrue(status.supported)
+        self.assertTrue(status.enabled)
+        self.assertEqual("windows", status.platform)
+        self.assertTrue(connection.closed)
+
+    def test_disabled_windows_device_is_reported(self) -> None:
+        connection = windows_connection(("fDenyTSConnections", "RDP=1\n", 0))
+        with patched_connect(connection):
+            status = asyncio.run(check_rdp(device(), {}))
+        self.assertTrue(status.supported)
+        self.assertFalse(status.enabled)
+
+    def test_missing_registry_value_is_not_enabled(self) -> None:
+        connection = windows_connection(("fDenyTSConnections", "", 1))
+        with patched_connect(connection):
+            status = asyncio.run(check_rdp(device(), {}))
+        self.assertTrue(status.supported)
+        self.assertFalse(status.enabled)
+
+    def test_router_is_unsupported_and_not_asked_about_registry(self) -> None:
+        """У OpenWrt RDP не выключен, а отсутствует: реестр спрашивать нечего."""
+        connection = openwrt_connection()
+        with patched_connect(connection):
+            status = asyncio.run(check_rdp(device(), {}))
+        self.assertFalse(status.supported)
+        self.assertFalse(status.enabled)
+        self.assertEqual("openwrt", status.platform)
+        self.assertNotIn(
+            "fDenyTSConnections", " ".join(connection.commands)
+        )
+
+    def test_check_never_touches_the_network_port(self) -> None:
+        """Проверка идёт по SSH: сырого подключения к 3389 быть не должно."""
+        connection = windows_connection(("fDenyTSConnections", "RDP=0\n", 0))
+        with patched_connect(connection):
+            asyncio.run(check_rdp(device(), {}))
+        self.assertNotIn("3389", " ".join(connection.commands))
+
+
+class RdpEnabledTests(unittest.TestCase):
+    def test_enabled_device_returns_true(self) -> None:
+        connection = windows_connection(("fDenyTSConnections", "RDP=0\n", 0))
+        with patched_connect(connection):
+            self.assertTrue(asyncio.run(is_rdp_enabled(device(), {})))
+
+    def test_disabled_device_returns_false(self) -> None:
+        connection = windows_connection(("fDenyTSConnections", "RDP=1\n", 0))
+        with patched_connect(connection):
+            self.assertFalse(asyncio.run(is_rdp_enabled(device(), {})))
+
+    def test_non_windows_device_is_rejected_with_a_clear_message(self) -> None:
+        connection = openwrt_connection()
+        with patched_connect(connection), self.assertRaises(RuntimeError) as error:
+            asyncio.run(is_rdp_enabled(device(), {}))
+        self.assertIn("только у Windows", str(error.exception))
+        self.assertTrue(connection.closed)
+
+
+class RdpEnableTests(unittest.TestCase):
+    def test_only_incoming_connections_are_allowed(self) -> None:
+        connection = windows_connection(("fDenyTSConnections", "RDP=0\n", 0))
+        with patched_connect(connection):
+            self.assertIsNone(asyncio.run(enable_rdp(device(), {})))
+        command = connection.commands[-1]
+        self.assertIn("fDenyTSConnections", command)
+        self.assertIn("-Value 0", command)
+
+    def test_firewall_is_never_opened(self) -> None:
+        """Смысл модели: порт 3389 наружу не открывается никогда."""
+        connection = windows_connection(("fDenyTSConnections", "RDP=0\n", 0))
+        with patched_connect(connection):
+            asyncio.run(enable_rdp(device(), {}))
+        sent = " ".join(connection.commands)
+        self.assertNotIn("NetFirewall", sent)
+        self.assertNotIn("netsh", sent)
+        self.assertNotIn("advfirewall", sent)
+
+    def test_non_windows_device_is_not_changed(self) -> None:
+        connection = openwrt_connection()
+        with patched_connect(connection), self.assertRaises(RuntimeError):
+            asyncio.run(enable_rdp(device(), {}))
+        self.assertNotIn("fDenyTSConnections", " ".join(connection.commands))
+
+    def test_failed_command_is_reported(self) -> None:
+        connection = windows_connection(("fDenyTSConnections", "нет доступа", 1))
+        with patched_connect(connection), self.assertRaises(RuntimeError):
+            asyncio.run(enable_rdp(device(), {}))
 
 
 class SystemdParsingTests(unittest.TestCase):

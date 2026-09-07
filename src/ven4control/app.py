@@ -20,6 +20,13 @@ from ven4control.log_sessions import preferred_export_format, session_manager
 from ven4control.log_worker import status_label
 from ven4control.models import Device
 from ven4control.paths import APP_KEY_PATH, BACKUP_DIR, DB_PATH
+from ven4control.rdp_tunnel import (
+    STATUS_ACTIVE as TUNNEL_ACTIVE,
+    RdpTunnel,
+    tunnel_manager,
+    tunnel_status_label,
+)
+from ven4control.remote_control import RdpStatus, check_rdp, enable_rdp
 from ven4control.ssh_service import (
     ensure_app_key,
     install_public_key,
@@ -47,14 +54,11 @@ def terminal_command(device: Device) -> list[str]:
     return args
 
 
-def rdp_command(device: Device) -> list[str]:
-    """Аргументы mstsc для подключения к устройству по RDP."""
-    host = device.host
-    # IPv6-адрес в /v: нужно брать в скобки, иначе mstsc принимает
-    # последнюю группу адреса за номер порта.
-    if ":" in host and not host.startswith("["):
-        host = f"[{host}]"
-    return ["mstsc.exe", f"/v:{host}:{device.rdp_port}"]
+# Состояния RDP для панели действий.
+RDP_UNKNOWN = "unknown"          # ещё не проверяли
+RDP_UNSUPPORTED = "unsupported"  # не Windows: RDP неприменим, а не выключен
+RDP_DISABLED = "disabled"        # Windows, приём подключений запрещён
+RDP_ENABLED = "enabled"          # Windows, можно открывать туннель
 
 
 def apply_rdp_result(device: Device, available: bool) -> bool:
@@ -70,11 +74,38 @@ def apply_rdp_result(device: Device, available: bool) -> bool:
     return True
 
 
+def rdp_state(device: Device | None, platform: str | None = None) -> str:
+    """Состояние RDP устройства для панели действий.
+
+    Платформа известна только после проверки в текущем запуске: в базе
+    хранится лишь признак «RDP включён». Поэтому свежий ответ о платформе
+    всегда важнее запомненного признака.
+    """
+    if device is None:
+        return RDP_UNKNOWN
+    if platform is not None and platform != "windows":
+        return RDP_UNSUPPORTED
+    if device.rdp_available:
+        return RDP_ENABLED
+    if platform == "windows":
+        return RDP_DISABLED
+    return RDP_UNKNOWN
+
+
 def rdp_check_label(device: Device | None) -> str:
     """Текст кнопки проверки RDP для трёх состояний устройства."""
     if device is not None and device.rdp_checked and not device.rdp_available:
-        return "RDP не отвечает — проверить снова"
+        return "RDP выключен — проверить снова"
     return "Проверить RDP"
+
+
+def rdp_cell_text(tunnel: RdpTunnel | None) -> str:
+    """Текст столбца RDP в списке устройств."""
+    if tunnel is None:
+        return "—"
+    if tunnel.status == TUNNEL_ACTIVE and tunnel.local_port:
+        return f"туннель 127.0.0.1:{tunnel.local_port}"
+    return tunnel_status_label(tunnel.status)
 
 
 def tailscale_candidates(
@@ -136,6 +167,11 @@ class MainWindow(QMainWindow):
         self.sessions = session_manager()
         self.sessions.status_changed.connect(self._session_status_changed)
         self.sessions.session_finished.connect(self._session_finished)
+        # RDP-туннели живут там же, на уровне приложения: свернули окно —
+        # открытая сессия продолжает работать.
+        self.tunnels = tunnel_manager()
+        self.tunnels.status_changed.connect(self._tunnel_status_changed)
+        self.tunnels.tunnel_closed.connect(self._tunnel_closed)
         self.tray: QSystemTrayIcon | None = None
         self._quitting = False
         self._tray_hint_shown = False
@@ -144,15 +180,19 @@ class MainWindow(QMainWindow):
         # Устройства, для которых сейчас идёт проверка RDP: без этого набора
         # обновление панели действий возвращало кнопке исходный текст.
         self.rdp_checking: set[int] = set()
+        # Платформа, определённая проверкой в текущем запуске. В базе её нет:
+        # там хранится только признак «RDP включён», а различать «выключен»
+        # и «неприменим» нужно для выбора кнопки.
+        self.rdp_platforms: dict[int, str] = {}
         # Счётчик перезагрузок списка: ответы старых проверок отбрасываются,
         # иначе состояние попадало в строку уже другого устройства.
         self.status_generation = 0
 
-        self.table = QTableWidget(0, 6)
+        self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(
             [
                 "Устройство", "Адрес", "Пользователь", "Состояние", "Задержка",
-                "Логирование",
+                "Логирование", "RDP",
             ]
         )
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -178,6 +218,8 @@ class MainWindow(QMainWindow):
         self.logging_button.clicked.connect(self.toggle_selected_logging)
         self.rdp_check_button = QPushButton(rdp_check_label(None))
         self.rdp_check_button.clicked.connect(self.check_selected_rdp)
+        self.rdp_enable_button = QPushButton("Включить RDP")
+        self.rdp_enable_button.clicked.connect(self.enable_selected_rdp)
         self.rdp_button = QPushButton("🖥️ RDP")
         self.rdp_button.clicked.connect(self.open_selected_rdp)
         self.forget_button = QPushButton("Удалить сохранённые данные")
@@ -188,6 +230,7 @@ class MainWindow(QMainWindow):
         action_layout.addWidget(self.logging_button)
         action_layout.addWidget(self.terminal_button)
         action_layout.addWidget(self.rdp_check_button)
+        action_layout.addWidget(self.rdp_enable_button)
         action_layout.addWidget(self.rdp_button)
         action_layout.addWidget(self.forget_button)
         action_layout.addWidget(self.delete_button)
@@ -278,18 +321,27 @@ class MainWindow(QMainWindow):
         if self.tray is None:
             return
         active = self.sessions.active_sessions()
+        tunnels = self.tunnels.active_tunnels()
+        lines: list[str] = []
         if active:
             names = ", ".join(
                 f"{item.device_name} — {status_label(item.status)}" for item in active
             )
-            self.tray.setToolTip(f"Ven4Control — фоновых сессий: {len(active)}\n{names}")
-        else:
-            self.tray.setToolTip("Ven4Control — фоновых сессий нет")
+            lines.append(f"фоновых сессий: {len(active)}\n{names}")
+        if tunnels:
+            names = ", ".join(item.device_name for item in tunnels)
+            lines.append(f"RDP-сессий: {len(tunnels)}\n{names}")
+        self.tray.setToolTip(
+            "Ven4Control — " + ("; ".join(lines) if lines else "фоновых сессий нет")
+        )
 
     def _logging_text(self, device: Device) -> str:
         if self.sessions.is_active(device.id):
             return status_label(self.sessions.status(device.id))
         return "включено при запуске" if device.log_background else "выключено"
+
+    def _rdp_text(self, device: Device) -> str:
+        return rdp_cell_text(self.tunnels.tunnel(device.id))
 
     def _session_status_changed(self, device_id: int, status: str) -> None:
         self._update_tray()
@@ -307,14 +359,37 @@ class MainWindow(QMainWindow):
                 "Ven4Control", message, QSystemTrayIcon.MessageIcon.Information
             )
 
+    def _tunnel_status_changed(self, device_id: int, _status: str) -> None:
+        row = self._row_of(device_id)
+        if row is not None and row < self.table.rowCount():
+            self.table.setItem(row, 6, QTableWidgetItem(self._rdp_text(self.devices[row])))
+        selected = self.selected_device()
+        if selected is not None and selected.id == device_id:
+            self._update_selection()
+
+    def _tunnel_closed(self, device_id: int, message: str) -> None:
+        row = self._row_of(device_id)
+        if row is not None and row < self.table.rowCount():
+            self.table.setItem(row, 6, QTableWidgetItem(self._rdp_text(self.devices[row])))
+        self._update_selection()
+        if self.tray is not None:
+            self.tray.showMessage(
+                "Ven4Control", message, QSystemTrayIcon.MessageIcon.Information
+            )
+
     def quit_application(self) -> None:
         active = self.sessions.active_count()
-        if active:
+        tunnels = self.tunnels.active_count()
+        if active or tunnels:
+            parts = []
+            if active:
+                parts.append(f"фоновых сессий логирования: {active}")
+            if tunnels:
+                parts.append(f"RDP-сессий: {tunnels}")
             answer = QMessageBox.question(
                 self,
                 "Выход из Ven4Control",
-                f"Идут фоновые сессии логирования: {active}. "
-                "Остановить их и выйти?",
+                f"Сейчас работают {', '.join(parts)}. Закрыть их и выйти?",
             )
             if answer != QMessageBox.StandardButton.Yes:
                 return
@@ -337,6 +412,7 @@ class MainWindow(QMainWindow):
             self.table.setItem(row, 3, QTableWidgetItem("Проверка…"))
             self.table.setItem(row, 4, QTableWidgetItem("—"))
             self.table.setItem(row, 5, QTableWidgetItem(self._logging_text(device)))
+            self.table.setItem(row, 6, QTableWidgetItem(self._rdp_text(device)))
         restored = self._row_of(selected_id)
         if restored is not None:
             self.table.selectRow(restored)
@@ -509,13 +585,28 @@ class MainWindow(QMainWindow):
             )
 
     def open_rdp(self, device: Device) -> None:
-        """Запускает клиент RDP. Фолбэк не нужен: mstsc есть в любой Windows."""
-        try:
-            subprocess.Popen(rdp_command(device))
-        except OSError as error:
-            QMessageBox.warning(
-                self, "RDP не запущен", f"Не удалось запустить mstsc: {error}"
+        """Открывает RDP внутри SSH-туннеля.
+
+        Прямого сетевого подключения к порту устройства не происходит:
+        `mstsc` идёт на локальный конец туннеля, поэтому порт 3389 наружу
+        открывать не нужно.
+        """
+        if device.id is None:
+            return
+        if self.tunnels.is_active(device.id):
+            QMessageBox.information(
+                self,
+                "RDP уже открыт",
+                f"Для «{device.name}» уже работает RDP-сессия. "
+                "Вторая поверх первой ничего не даст.",
             )
+            return
+        try:
+            self.tunnels.start(device, self.device_credentials(device))
+        except Exception as error:
+            QMessageBox.critical(self, "RDP не запущен", str(error))
+            return
+        self._update_selection()
 
     def selected_device(self) -> Device | None:
         row = self.table.currentRow()
@@ -540,14 +631,25 @@ class MainWindow(QMainWindow):
             "Остановить логирование" if active else "Логировать в фоне"
         )
         checking = device is not None and device.id in self.rdp_checking
+        state = rdp_state(
+            device,
+            self.rdp_platforms.get(device.id) if device is not None else None,
+        )
+        # У роутера или Linux-сервера RDP не выключен, а отсутствует: там
+        # нечего проверять и нечего включать.
+        self.rdp_check_button.setVisible(enabled and state != RDP_UNSUPPORTED)
         self.rdp_check_button.setEnabled(enabled and not checking)
         self.rdp_check_button.setText(
             "Проверка RDP…" if checking else rdp_check_label(device)
         )
+        self.rdp_enable_button.setVisible(state == RDP_DISABLED)
+        self.rdp_enable_button.setEnabled(enabled and not checking)
         # Кнопка запуска появляется только после успешной проверки: пока RDP
         # не подтверждён, у устройства остаётся путь через SSH-терминал.
-        self.rdp_button.setVisible(device is not None and device.rdp_available)
-        self.rdp_button.setEnabled(enabled)
+        tunnelled = device is not None and self.tunnels.is_active(device.id)
+        self.rdp_button.setVisible(state == RDP_ENABLED)
+        self.rdp_button.setEnabled(enabled and not tunnelled)
+        self.rdp_button.setText("RDP-сессия открыта" if tunnelled else "🖥️ RDP")
 
     def open_selected_terminal(self) -> None:
         device = self.selected_device()
@@ -560,37 +662,58 @@ class MainWindow(QMainWindow):
             self.open_rdp(device)
 
     def check_selected_rdp(self) -> None:
+        """Спрашивает состояние RDP по SSH, не подключаясь к порту 3389."""
         device = self.selected_device()
         if device is None or device.id is None:
             return
         if device.id in self.rdp_checking:
             return
+        if not self._require_fingerprint(device, "Проверка RDP недоступна"):
+            return
+        credentials = self.device_credentials(device)
         self.rdp_checking.add(device.id)
         self._update_selection()
         generation = self.status_generation
-        worker = Worker(tcp_check, device.host, device.rdp_port)
+
+        def operation(target=device, secrets=credentials):
+            return asyncio.run(check_rdp(target, secrets))
+
+        worker = Worker(operation)
         worker.signals.finished.connect(
-            lambda result, i=device.id, g=generation: self._set_rdp_result(
-                i, g, bool(result[0])
-            )
+            lambda result, i=device.id, g=generation: self._set_rdp_result(i, g, result)
         )
         worker.signals.failed.connect(
-            lambda _error, i=device.id, g=generation: self._set_rdp_result(i, g, False)
+            lambda error, i=device.id, g=generation: self._rdp_check_failed(i, g, error)
         )
         self._start_worker(worker)
 
+    def _require_fingerprint(self, device: Device, title: str) -> bool:
+        """RDP идёт по тому же доверенному каналу: без fingerprint нельзя."""
+        if device.fingerprint:
+            return True
+        QMessageBox.warning(
+            self,
+            title,
+            "Для устройства не сохранён SSH fingerprint. "
+            "Переустановите ключ Ven4Control и повторите.",
+        )
+        return False
+
     def _set_rdp_result(
-        self, device_id: int, generation: int, available: bool
+        self, device_id: int, generation: int, status: object
     ) -> None:
         self.rdp_checking.discard(device_id)
         # Список мог быть перезагружен: результат относился бы к другой записи.
         if generation != self.status_generation:
             return
+        if not isinstance(status, RdpStatus):
+            return
+        self.rdp_platforms[device_id] = status.platform
         row = self._row_of(device_id)
         if row is None:
             return
         device = self.devices[row]
-        if apply_rdp_result(device, available):
+        if apply_rdp_result(device, status.supported and status.enabled):
             try:
                 self.storage.save(device)
             except Exception as error:
@@ -600,6 +723,89 @@ class MainWindow(QMainWindow):
                     f"RDP проверен, но запись в базу не обновлена: {error}",
                 )
         self._update_selection()
+        if not status.supported:
+            QMessageBox.information(
+                self,
+                "RDP неприменим",
+                f"Устройство определено как {status.description} "
+                f"({status.platform}). Удалённый рабочий стол есть только "
+                "у Windows.",
+            )
+
+    def _rdp_check_failed(self, device_id: int, generation: int, error: str) -> None:
+        self.rdp_checking.discard(device_id)
+        if generation != self.status_generation:
+            return
+        self._update_selection()
+        QMessageBox.warning(self, "Проверка RDP не выполнена", error)
+
+    def enable_selected_rdp(self) -> None:
+        """Разрешает приём RDP на устройстве. Файрвол при этом не трогается."""
+        device = self.selected_device()
+        if device is None or device.id is None:
+            return
+        if not self._require_fingerprint(device, "Включение RDP недоступно"):
+            return
+        answer = QMessageBox.warning(
+            self,
+            "Включение RDP",
+            f"На устройстве «{device.name}» будет разрешён приём входящих "
+            "RDP-подключений. Порт наружу не открывается: подключение пойдёт "
+            "внутри SSH-туннеля.\n\nПродолжить?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        credentials = self.device_credentials(device)
+        self.rdp_checking.add(device.id)
+        self._update_selection()
+        generation = self.status_generation
+
+        def operation(target=device, secrets=credentials):
+            return asyncio.run(enable_rdp(target, secrets))
+
+        worker = Worker(operation)
+        worker.signals.finished.connect(
+            lambda _result, i=device.id, g=generation: self._rdp_enabled(i, g)
+        )
+        worker.signals.failed.connect(
+            lambda error, i=device.id, g=generation: self._rdp_enable_failed(i, g, error)
+        )
+        self._start_worker(worker)
+
+    def _rdp_enabled(self, device_id: int, generation: int) -> None:
+        self.rdp_checking.discard(device_id)
+        if generation != self.status_generation:
+            return
+        self.rdp_platforms[device_id] = "windows"
+        row = self._row_of(device_id)
+        if row is None:
+            return
+        device = self.devices[row]
+        if apply_rdp_result(device, True):
+            try:
+                self.storage.save(device)
+            except Exception as error:
+                QMessageBox.warning(
+                    self,
+                    "Настройка не сохранена",
+                    f"RDP включён, но запись в базу не обновлена: {error}",
+                )
+        self._update_selection()
+        QMessageBox.information(
+            self,
+            "RDP включён",
+            f"Устройство «{device.name}» принимает RDP-подключения. "
+            "Кнопка «🖥️ RDP» откроет сессию внутри SSH-туннеля.",
+        )
+
+    def _rdp_enable_failed(self, device_id: int, generation: int, error: str) -> None:
+        self.rdp_checking.discard(device_id)
+        if generation != self.status_generation:
+            return
+        self._update_selection()
+        QMessageBox.critical(self, "RDP не включён", error)
 
     def device_credentials(self, device: Device, silent: bool = False) -> dict[str, str]:
         credentials = {"password": "", "passphrase": ""}
@@ -735,8 +941,10 @@ class MainWindow(QMainWindow):
         # Сессия удалённого устройства осталась бы висеть в реестре и писать
         # журнал в папку уже несуществующей записи.
         self.sessions.stop(device.id)
+        self.tunnels.close(device.id)
         self.credentials.delete(device.id)
         self.storage.delete(device.id)
+        self.rdp_platforms.pop(device.id, None)
         self.reload()
 
     def show_instructions(self) -> None:
@@ -766,6 +974,7 @@ class MainWindow(QMainWindow):
                 self._tray_hint_shown = True
             return
         self.pool.waitForDone(5000)
+        self.tunnels.shutdown()
         self.sessions.shutdown()
         event.accept()
 

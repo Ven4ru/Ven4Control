@@ -1,13 +1,24 @@
 import unittest
 
 from ven4control.app import (
+    RDP_DISABLED,
+    RDP_ENABLED,
+    RDP_UNKNOWN,
+    RDP_UNSUPPORTED,
     apply_rdp_result,
+    rdp_cell_text,
     rdp_check_label,
-    rdp_command,
+    rdp_state,
     tailscale_candidates,
     terminal_command,
 )
 from ven4control.models import Device
+from ven4control.rdp_tunnel import (
+    STATUS_ACTIVE,
+    STATUS_FAILED,
+    STATUS_STARTING,
+    RdpTunnel,
+)
 
 
 class TerminalCommandTests(unittest.TestCase):
@@ -36,26 +47,58 @@ class TerminalCommandTests(unittest.TestCase):
         self.assertEqual(["ssh", "-p", "22", "root@host"], terminal_command(device))
 
 
-class RdpCommandTests(unittest.TestCase):
-    def test_default_port_is_passed_explicitly(self) -> None:
-        device = Device(1, "ПК", "100.64.0.7", 22, "user")
-        self.assertEqual(["mstsc.exe", "/v:100.64.0.7:3389"], rdp_command(device))
+class RdpPanelStateTests(unittest.TestCase):
+    def _device(self) -> Device:
+        return Device(1, "ПК", "100.64.0.7", 22, "user")
 
-    def test_custom_port_is_used(self) -> None:
-        device = Device(1, "ПК", "198.51.100.10", 2222, "user", rdp_port=13389)
-        self.assertEqual(["mstsc.exe", "/v:198.51.100.10:13389"], rdp_command(device))
+    def test_unchecked_device_has_no_rdp_buttons(self) -> None:
+        self.assertEqual(RDP_UNKNOWN, rdp_state(None))
+        self.assertEqual(RDP_UNKNOWN, rdp_state(self._device()))
 
-    def test_ipv6_host_is_wrapped_in_brackets(self) -> None:
-        device = Device(1, "ПК", "2001:db8::5", 22, "user")
-        self.assertEqual(["mstsc.exe", "/v:[2001:db8::5]:3389"], rdp_command(device))
+    def test_router_is_unsupported_not_disabled(self) -> None:
+        """У OpenWrt RDP отсутствует: кнопка включения там гарантированно врёт."""
+        self.assertEqual(RDP_UNSUPPORTED, rdp_state(self._device(), "openwrt"))
+        self.assertEqual(RDP_UNSUPPORTED, rdp_state(self._device(), "linux"))
 
-    def test_already_bracketed_host_is_not_wrapped_twice(self) -> None:
-        device = Device(1, "ПК", "[2001:db8::5]", 22, "user")
-        self.assertEqual(["mstsc.exe", "/v:[2001:db8::5]:3389"], rdp_command(device))
+    def test_windows_without_rdp_offers_enabling(self) -> None:
+        self.assertEqual(RDP_DISABLED, rdp_state(self._device(), "windows"))
 
-    def test_ssh_port_does_not_affect_rdp_command(self) -> None:
-        device = Device(1, "ПК", "host", 2222, "user")
-        self.assertNotIn("/v:host:2222", rdp_command(device))
+    def test_windows_with_rdp_offers_the_session(self) -> None:
+        device = self._device()
+        apply_rdp_result(device, True)
+        self.assertEqual(RDP_ENABLED, rdp_state(device, "windows"))
+
+    def test_saved_result_survives_a_restart_without_a_known_platform(self) -> None:
+        device = self._device()
+        apply_rdp_result(device, True)
+        self.assertEqual(RDP_ENABLED, rdp_state(device))
+
+    def test_fresh_platform_answer_overrides_the_saved_flag(self) -> None:
+        """Устройство могли заменить: свежий ответ важнее записи в базе."""
+        device = self._device()
+        apply_rdp_result(device, True)
+        self.assertEqual(RDP_UNSUPPORTED, rdp_state(device, "openwrt"))
+
+
+class RdpCellTests(unittest.TestCase):
+    def _tunnel(self, status: str, port: int = 0) -> RdpTunnel:
+        return RdpTunnel(1, "ПК", 3389, local_port=port, status=status)
+
+    def test_device_without_a_tunnel_is_empty(self) -> None:
+        self.assertEqual("—", rdp_cell_text(None))
+
+    def test_open_tunnel_shows_the_local_end(self) -> None:
+        self.assertEqual(
+            "туннель 127.0.0.1:54321",
+            rdp_cell_text(self._tunnel(STATUS_ACTIVE, 54321)),
+        )
+
+    def test_other_states_are_named(self) -> None:
+        self.assertEqual("подключение…", rdp_cell_text(self._tunnel(STATUS_STARTING)))
+        self.assertEqual("ошибка", rdp_cell_text(self._tunnel(STATUS_FAILED)))
+
+    def test_active_tunnel_without_a_port_is_not_shown_as_ready(self) -> None:
+        self.assertEqual("открыт", rdp_cell_text(self._tunnel(STATUS_ACTIVE)))
 
 
 class RdpStateTests(unittest.TestCase):
@@ -97,7 +140,7 @@ class RdpStateTests(unittest.TestCase):
         self.assertEqual("Проверить RDP", rdp_check_label(None))
         self.assertEqual("Проверить RDP", rdp_check_label(device))
         apply_rdp_result(device, False)
-        self.assertEqual("RDP не отвечает — проверить снова", rdp_check_label(device))
+        self.assertEqual("RDP выключен — проверить снова", rdp_check_label(device))
         apply_rdp_result(device, True)
         self.assertEqual("Проверить RDP", rdp_check_label(device))
 
