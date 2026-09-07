@@ -68,6 +68,28 @@ POSIX_PLATFORM_COMMAND = (
 )
 
 
+# Ветка реестра службы удалённых рабочих столов Windows.
+TERMINAL_SERVER_KEY = "HKLM:\\System\\CurrentControlSet\\Control\\Terminal Server"
+
+# Метка, по которой ответ узнаётся среди прочего вывода PowerShell.
+RDP_STATE_MARKER = "RDP"
+
+RDP_STATE_COMMAND = (
+    f"$v = (Get-ItemProperty -Path '{TERMINAL_SERVER_KEY}' "
+    "-Name fDenyTSConnections -ErrorAction Stop).fDenyTSConnections; "
+    f"Write-Output ('{RDP_STATE_MARKER}=' + [int]$v)"
+)
+
+# Включение меняет только приём входящих подключений. Правила файрвола не
+# трогаются намеренно: RDP ходит внутри SSH-туннеля на 127.0.0.1 устройства,
+# и открытый наружу порт 3389 не нужен ни при каких условиях.
+RDP_ENABLE_COMMAND = (
+    f"Set-ItemProperty -Path '{TERMINAL_SERVER_KEY}' "
+    "-Name fDenyTSConnections -Value 0 -Type DWord -ErrorAction Stop; "
+    f"Write-Output '{RDP_STATE_MARKER}=0'"
+)
+
+
 class FingerprintError(RuntimeError):
     """SSH fingerprint не сохранён или не совпадает с записанным ранее.
 
@@ -103,6 +125,24 @@ class ServiceInfo:
     name: str
     state: str
     details: str = ""
+
+
+@dataclass(slots=True)
+class RdpStatus:
+    """Ответ на вопрос «можно ли подключиться к устройству по RDP».
+
+    Платформа хранится рядом с признаком, чтобы интерфейс отличал
+    «RDP выключен» от «RDP неприменим»: у роутера и Linux-сервера его нет
+    вовсе, и предлагать там кнопку включения бессмысленно.
+    """
+
+    platform: str
+    description: str
+    enabled: bool
+
+    @property
+    def supported(self) -> bool:
+        return self.platform == "windows"
 
 
 def _connection_options(
@@ -203,6 +243,101 @@ async def detect_platform(
     if not lines:
         raise RuntimeError("Не удалось определить систему устройства.")
     return lines[0], lines[1] if len(lines) > 1 else lines[0]
+
+
+async def _require_windows(
+    connection: asyncssh.SSHClientConnection,
+) -> tuple[str, str]:
+    """Возвращает платформу или отказывает, если это не Windows."""
+    platform, description = await detect_platform(connection)
+    if platform != "windows":
+        raise RuntimeError(
+            f"RDP есть только у Windows, устройство определено как "
+            f"{description} ({platform})."
+        )
+    return platform, description
+
+
+def parse_rdp_state(output: str) -> bool:
+    """Разбирает ответ проверки RDP.
+
+    Ноль в fDenyTSConnections означает «входящие RDP-подключения разрешены»;
+    любое другое значение и отсутствие строки считаются запретом.
+    """
+    for line in output.splitlines():
+        text = line.strip()
+        if text.startswith(f"{RDP_STATE_MARKER}="):
+            value = text.split("=", 1)[1].strip()
+            try:
+                return int(value) == 0
+            except ValueError:
+                return False
+    return False
+
+
+async def check_rdp(
+    device: Device,
+    credentials: dict[str, str],
+) -> RdpStatus:
+    """Узнаёт по SSH, принимает ли устройство RDP-подключения.
+
+    Сетевого обращения к порту RDP не происходит: состояние читается из
+    реестра через то же доверенное SSH-соединение, что и всё управление,
+    поэтому порт 3389 наружу открывать не требуется.
+    """
+    connection = await _connect(device, credentials)
+    try:
+        platform, description = await detect_platform(connection)
+        if platform != "windows":
+            return RdpStatus(platform, description, False)
+        result = await _run(connection, RDP_STATE_COMMAND, timeout=30)
+        if result.exit_status != 0:
+            # Значения в реестре нет: RDP на устройстве ни разу не включали.
+            return RdpStatus(platform, description, False)
+        return RdpStatus(platform, description, parse_rdp_state(result.stdout))
+    finally:
+        connection.close()
+        await connection.wait_closed()
+
+
+async def is_rdp_enabled(
+    device: Device,
+    credentials: dict[str, str],
+) -> bool:
+    """True, если Windows-устройство принимает входящие RDP-подключения.
+
+    Для не-Windows поднимает ошибку: у таких устройств RDP не выключен,
+    а отсутствует, и молчаливое False скрыло бы разницу.
+    """
+    connection = await _connect(device, credentials)
+    try:
+        await _require_windows(connection)
+        result = await _run(connection, RDP_STATE_COMMAND, timeout=30)
+        if result.exit_status != 0:
+            return False
+        return parse_rdp_state(result.stdout)
+    finally:
+        connection.close()
+        await connection.wait_closed()
+
+
+async def enable_rdp(
+    device: Device,
+    credentials: dict[str, str],
+) -> None:
+    """Разрешает приём входящих RDP-подключений на Windows-устройстве.
+
+    Меняется только локальная настройка службы удалённых рабочих столов.
+    Файрвол не трогается намеренно: подключение идёт внутри SSH-туннеля на
+    127.0.0.1 устройства, поэтому порт наружу не нужен.
+    """
+    connection = await _connect(device, credentials)
+    try:
+        await _require_windows(connection)
+        await _run(connection, RDP_ENABLE_COMMAND, timeout=60, check=True)
+    finally:
+        connection.close()
+        await connection.wait_closed()
 
 
 async def collect_overview(
