@@ -1,6 +1,8 @@
 import base64
+import re
 import subprocess
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from ven4control import scheduled_task
@@ -10,6 +12,13 @@ def decoded(arguments: list[str]) -> str:
     """Возвращает скрипт из аргументов powershell.exe."""
     index = arguments.index("-EncodedCommand")
     return base64.b64decode(arguments[index + 1]).decode("utf-16-le")
+
+
+def error_path(script: str) -> str:
+    """Путь файла, в который скрипт запишет причину отказа."""
+    match = re.search(r"-FilePath '([^']*)'", script)
+    assert match is not None
+    return match.group(1)
 
 
 class SplitCommandTests(unittest.TestCase):
@@ -253,16 +262,110 @@ class EnableDisableTests(unittest.TestCase):
         elevated.assert_not_called()
 
 
-class CurrentUserTests(unittest.TestCase):
-    def test_domain_and_name_are_joined(self) -> None:
-        with mock.patch.dict(
-            "os.environ", {"USERDOMAIN": "DOMAIN", "USERNAME": "user"}, clear=False
-        ):
-            self.assertEqual("DOMAIN\\user", scheduled_task.current_user())
+class ErrorReportTests(unittest.TestCase):
+    """Повышенный процесс не отдаёт вывод родителю: причина приходит файлом."""
 
-    def test_name_without_domain_is_enough(self) -> None:
-        environment = {"USERNAME": "user"}
-        with mock.patch.dict("os.environ", environment, clear=True):
+    REASON = (
+        "Нет сопоставления между именами учётных записей и кодами "
+        "безопасности. (0x80070534)"
+    )
+
+    def test_script_writes_the_reason_to_the_named_file(self) -> None:
+        script = scheduled_task.build_error_report(
+            "Register-ScheduledTask", r"C:\Temp\ошибка.txt"
+        )
+        self.assertIn("try {", script)
+        self.assertIn("Register-ScheduledTask", script)
+        self.assertIn(
+            "$_.Exception.Message | Out-File -FilePath 'C:\\Temp\\ошибка.txt'",
+            script,
+        )
+        self.assertIn("exit 1", script)
+
+    def _failing_run(self, reason: str, seen: list[str]):
+        def run(arguments: list[str]) -> None:
+            path = error_path(decoded(arguments))
+            seen.append(path)
+            if reason:
+                Path(path).write_text(reason, encoding="utf-8-sig")
+            raise OSError("PowerShell завершился с кодом 1")
+
+        return run
+
+    def _enable_with_failure(self, reason: str) -> tuple[str, list[str]]:
+        seen: list[str] = []
+        with mock.patch.object(scheduled_task, "is_supported", return_value=True), \
+                mock.patch.object(
+                    scheduled_task, "current_user", return_value="PC\\user"
+                ), \
+                mock.patch.object(
+                    scheduled_task,
+                    "_run_elevated",
+                    side_effect=self._failing_run(reason, seen),
+                ):
+            with self.assertRaises(OSError) as raised:
+                scheduled_task.enable('"app.exe" --tray', "Ven4ControlTest")
+        return str(raised.exception), seen
+
+    def test_reason_reaches_the_user(self) -> None:
+        message, _ = self._enable_with_failure(self.REASON)
+        self.assertIn(self.REASON, message)
+        self.assertIn("кодом 1", message)
+
+    def test_disable_reports_the_reason_too(self) -> None:
+        seen: list[str] = []
+        with mock.patch.object(scheduled_task, "is_supported", return_value=True), \
+                mock.patch.object(
+                    scheduled_task,
+                    "_run_elevated",
+                    side_effect=self._failing_run("Отказано в доступе", seen),
+                ):
+            with self.assertRaises(OSError) as raised:
+                scheduled_task.disable("Ven4ControlTest")
+        self.assertIn("Отказано в доступе", str(raised.exception))
+
+    def test_empty_report_keeps_the_original_message(self) -> None:
+        message, _ = self._enable_with_failure("")
+        self.assertEqual("PowerShell завершился с кодом 1", message)
+
+    def test_temporary_file_does_not_stay_behind(self) -> None:
+        _, seen = self._enable_with_failure(self.REASON)
+        self.assertFalse(Path(seen[0]).exists())
+
+
+class CurrentUserTests(unittest.TestCase):
+    def test_computer_name_is_the_area(self) -> None:
+        with mock.patch.dict(
+            "os.environ",
+            {"COMPUTERNAME": "DESKTOP-P1097DP", "USERNAME": "venchwork"},
+            clear=True,
+        ):
+            self.assertEqual(
+                "DESKTOP-P1097DP\\venchwork", scheduled_task.current_user()
+            )
+
+    def test_workgroup_is_never_used_as_the_area(self) -> None:
+        """Живая проверка: рабочая группа не сопоставляется с учётной записью.
+
+        На машине вне домена Windows кладёт в USERDOMAIN имя рабочей группы, и
+        регистрация задачи отвечала 0x80070534 — «нет сопоставления имени с
+        SID».
+        """
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "USERDOMAIN": "WORKGROUP",
+                "COMPUTERNAME": "DESKTOP-P1097DP",
+                "USERNAME": "venchwork",
+            },
+            clear=True,
+        ):
+            user = scheduled_task.current_user()
+        self.assertNotIn("WORKGROUP", user)
+        self.assertEqual("DESKTOP-P1097DP\\venchwork", user)
+
+    def test_name_without_computer_is_enough(self) -> None:
+        with mock.patch.dict("os.environ", {"USERNAME": "user"}, clear=True):
             self.assertEqual("user", scheduled_task.current_user())
 
 
