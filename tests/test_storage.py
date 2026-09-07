@@ -39,6 +39,9 @@ class StorageTests(unittest.TestCase):
                     save_credentials=True,
                     fingerprint="SHA256:abcdef0123456789",
                     log_background=True,
+                    rdp_port=3390,
+                    rdp_checked=True,
+                    rdp_available=True,
                 )
             )
 
@@ -57,6 +60,9 @@ class StorageTests(unittest.TestCase):
             self.assertTrue(loaded.save_credentials)
             self.assertEqual("SHA256:abcdef0123456789", loaded.fingerprint)
             self.assertTrue(loaded.log_background)
+            self.assertEqual(3390, loaded.rdp_port)
+            self.assertTrue(loaded.rdp_checked)
+            self.assertTrue(loaded.rdp_available)
 
     def test_existing_database_is_opened_without_changes(self):
         """Повторное открытие не должно менять схему рабочей базы."""
@@ -121,6 +127,106 @@ class StorageTests(unittest.TestCase):
             self.assertTrue(device.save_credentials)
             self.assertEqual("", device.fingerprint)
             self.assertFalse(device.log_background)
+            self.assertEqual(3389, device.rdp_port)
+            self.assertFalse(device.rdp_checked)
+            self.assertFalse(device.rdp_available)
+
+    def test_database_without_rdp_columns_keeps_saved_devices(self):
+        """База версии 0.1.0-beta открывается новым кодом без потери устройств.
+
+        Проверяется полный набор колонок предыдущего релиза: рабочая база
+        пользователя выглядит именно так, и после добавления колонок RDP
+        все сохранённые подключения должны читаться и сохраняться дальше.
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "devices.db"
+            with closing(sqlite3.connect(path)) as db:
+                db.execute(
+                    """
+                    CREATE TABLE devices (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT NOT NULL,
+                        host TEXT NOT NULL,
+                        port INTEGER NOT NULL DEFAULT 22,
+                        username TEXT NOT NULL,
+                        auth_type TEXT NOT NULL DEFAULT 'password',
+                        key_path TEXT NOT NULL DEFAULT '',
+                        save_credentials INTEGER NOT NULL DEFAULT 0,
+                        fingerprint TEXT NOT NULL DEFAULT '',
+                        log_background INTEGER NOT NULL DEFAULT 0,
+                        UNIQUE(host, port, username)
+                    )
+                    """
+                )
+                db.executemany(
+                    "INSERT INTO devices (name, host, port, username, auth_type,"
+                    " key_path, save_credentials, fingerprint, log_background)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        (
+                            "Роутер", "192.168.99.1", 22, "root", "key",
+                            "C:/keys/id_ed25519", 1, "SHA256:router", 1,
+                        ),
+                        (
+                            "Домашний ПК", "100.64.0.7", 2222, "user", "password",
+                            "", 0, "SHA256:pc", 0,
+                        ),
+                    ],
+                )
+                db.commit()
+
+            storage = DeviceStorage(path)
+            devices = {device.name: device for device in storage.list_devices()}
+            self.assertEqual({"Домашний ПК", "Роутер"}, set(devices))
+
+            router = devices["Роутер"]
+            self.assertEqual("192.168.99.1", router.host)
+            self.assertEqual(22, router.port)
+            self.assertEqual("key", router.auth_type)
+            self.assertEqual("C:/keys/id_ed25519", router.key_path)
+            self.assertTrue(router.save_credentials)
+            self.assertEqual("SHA256:router", router.fingerprint)
+            self.assertTrue(router.log_background)
+
+            computer = devices["Домашний ПК"]
+            self.assertEqual("100.64.0.7", computer.host)
+            self.assertEqual(2222, computer.port)
+            self.assertEqual("user", computer.username)
+            self.assertEqual("SHA256:pc", computer.fingerprint)
+
+            # Новые поля получают безопасные значения: RDP ещё не проверялся.
+            for device in devices.values():
+                self.assertEqual(3389, device.rdp_port)
+                self.assertFalse(device.rdp_checked)
+                self.assertFalse(device.rdp_available)
+
+            # Старая запись остаётся обновляемой после добавления колонок.
+            computer.rdp_checked = True
+            computer.rdp_available = True
+            storage.save(computer)
+            reopened = {
+                device.name: device for device in DeviceStorage(path).list_devices()
+            }
+            self.assertTrue(reopened["Домашний ПК"].rdp_available)
+            self.assertEqual("SHA256:pc", reopened["Домашний ПК"].fingerprint)
+            self.assertFalse(reopened["Роутер"].rdp_checked)
+            self.assertTrue(reopened["Роутер"].log_background)
+
+    def test_rdp_result_survives_reopen(self):
+        """Результат проверки RDP не должен запрашиваться заново при запуске."""
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "devices.db"
+            storage = DeviceStorage(path)
+            device = storage.save(Device(None, "ПК", "198.51.100.10", 22, "user"))
+            self.assertFalse(device.rdp_checked)
+
+            device.rdp_checked = True
+            device.rdp_available = False
+            storage.save(device)
+
+            loaded = DeviceStorage(path).list_devices()[0]
+            self.assertTrue(loaded.rdp_checked)
+            self.assertFalse(loaded.rdp_available)
 
     def test_null_values_do_not_break_key_authentication(self):
         """Пустое имя из чужой базы не должно ломать чтение данных входа."""
