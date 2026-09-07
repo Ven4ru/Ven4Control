@@ -46,6 +46,28 @@ uptime -p 2>/dev/null || awk '{printf "%.1f hours\n", $1/3600}' /proc/uptime
 """
 
 
+# Проба Windows: переменная $PSVersionTable существует только в PowerShell,
+# который служит оболочкой по умолчанию во встроенном OpenSSH Server Windows.
+# В POSIX-оболочке этот текст не разбирается и завершается ненулевым кодом,
+# поэтому проба безопасна для роутеров и Linux-серверов.
+WINDOWS_PLATFORM_COMMAND = (
+    "if ($null -eq $PSVersionTable) { exit 1 }; "
+    "Write-Output 'windows'; "
+    "$c = (Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue).Caption; "
+    "if (-not $c) { $c = 'Windows ' + [System.Environment]::OSVersion.Version }; "
+    "Write-Output $c"
+)
+
+# Проба POSIX: разделяет OpenWrt и остальной Linux.
+POSIX_PLATFORM_COMMAND = (
+    "if [ -f /etc/openwrt_release ]; then "
+    ". /etc/openwrt_release; echo openwrt; echo \"${DISTRIB_DESCRIPTION:-OpenWrt}\"; "
+    "elif [ -f /etc/os-release ]; then "
+    ". /etc/os-release; echo linux; echo \"${PRETTY_NAME:-Linux}\"; "
+    "else echo linux; uname -sr; fi"
+)
+
+
 class FingerprintError(RuntimeError):
     """SSH fingerprint не сохранён или не совпадает с записанным ранее.
 
@@ -144,18 +166,39 @@ async def _run(
     return result
 
 
+async def _detect_windows(
+    connection: asyncssh.SSHClientConnection,
+) -> tuple[str, str] | None:
+    """Пробует опознать Windows. None — устройство отвечает не PowerShell."""
+    try:
+        result = await _run(connection, WINDOWS_PLATFORM_COMMAND, timeout=20)
+    except (RuntimeError, OSError, asyncssh.Error):
+        # Проба ничего не ломает: неудача просто означает «не Windows».
+        return None
+    if result.exit_status != 0:
+        return None
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    # Оболочка могла проглотить текст и вернуть нулевой код: доверяем только
+    # ответу нужного вида.
+    if not lines or lines[0] != "windows":
+        return None
+    return "windows", lines[1] if len(lines) > 1 else "Windows"
+
+
 async def detect_platform(
     connection: asyncssh.SSHClientConnection,
 ) -> tuple[str, str]:
-    result = await _run(
-        connection,
-        "if [ -f /etc/openwrt_release ]; then "
-        ". /etc/openwrt_release; echo openwrt; echo \"${DISTRIB_DESCRIPTION:-OpenWrt}\"; "
-        "elif [ -f /etc/os-release ]; then "
-        ". /etc/os-release; echo linux; echo \"${PRETTY_NAME:-Linux}\"; "
-        "else echo linux; uname -sr; fi",
-        check=True,
-    )
+    """Определяет платформу устройства: windows, openwrt или linux.
+
+    Порядок проб важен. Windows-машины подключаются через встроенный OpenSSH
+    Server, где оболочка по умолчанию — PowerShell, и POSIX-команда там не
+    выполняется как задумано. Поэтому сначала проверяется PowerShell, а при
+    неудаче остаётся прежняя POSIX-проба для OpenWrt и Linux.
+    """
+    windows = await _detect_windows(connection)
+    if windows is not None:
+        return windows
+    result = await _run(connection, POSIX_PLATFORM_COMMAND, check=True)
     lines = result.stdout.strip().splitlines()
     if not lines:
         raise RuntimeError("Не удалось определить систему устройства.")

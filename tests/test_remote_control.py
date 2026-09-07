@@ -1,4 +1,6 @@
+import asyncio
 import unittest
+from types import SimpleNamespace
 
 from ven4control.remote_control import (
     MAX_LOG_LINES,
@@ -6,8 +8,100 @@ from ven4control.remote_control import (
     _first_health_message,
     build_backup_command,
     build_log_command,
+    detect_platform,
     parse_systemd_services,
 )
+
+
+# Ответ PowerShell-пробы на настоящей Windows-машине.
+WINDOWS_ANSWER = "windows\nMicrosoft Windows 11 Pro\n"
+
+# POSIX-оболочка не разбирает текст пробы и завершается ненулевым кодом.
+SHELL_SYNTAX_ERROR = ("", 2)
+
+
+class FakeConnection:
+    """SSH-соединение для тестов: отвечает по подстроке в команде.
+
+    Позволяет проверять команды и разбор ответов без настоящего SSH.
+    """
+
+    def __init__(self, replies: list[tuple[str, str, int]] | None = None) -> None:
+        # Каждая запись: подстрока команды, stdout, код возврата.
+        self.replies = list(replies or [])
+        self.commands: list[str] = []
+        self.closed = False
+
+    async def run(self, command: str, check: bool = False, timeout: int = 60):
+        self.commands.append(command)
+        for marker, stdout, status in self.replies:
+            if marker in command:
+                return SimpleNamespace(stdout=stdout, stderr="", exit_status=status)
+        return SimpleNamespace(stdout="", stderr="команда не найдена", exit_status=127)
+
+    def close(self) -> None:
+        self.closed = True
+
+    async def wait_closed(self) -> None:
+        return None
+
+
+def windows_connection(*extra: tuple[str, str, int]) -> FakeConnection:
+    return FakeConnection([("$PSVersionTable", WINDOWS_ANSWER, 0), *extra])
+
+
+def openwrt_connection(*extra: tuple[str, str, int]) -> FakeConnection:
+    return FakeConnection(
+        [
+            ("$PSVersionTable", *SHELL_SYNTAX_ERROR),
+            ("openwrt_release", "openwrt\nOpenWrt 23.05.5\n", 0),
+            *extra,
+        ]
+    )
+
+
+class DetectPlatformTests(unittest.TestCase):
+    def test_powershell_device_is_detected_as_windows(self) -> None:
+        connection = windows_connection()
+        platform, description = asyncio.run(detect_platform(connection))
+        self.assertEqual("windows", platform)
+        self.assertEqual("Microsoft Windows 11 Pro", description)
+
+    def test_powershell_probe_goes_first_and_posix_stays_a_fallback(self) -> None:
+        """POSIX-команда в PowerShell не выполняется, поэтому проба первая."""
+        connection = openwrt_connection()
+        platform, description = asyncio.run(detect_platform(connection))
+        self.assertEqual("openwrt", platform)
+        self.assertEqual("OpenWrt 23.05.5", description)
+        self.assertIn("$PSVersionTable", connection.commands[0])
+        self.assertIn("openwrt_release", connection.commands[1])
+
+    def test_windows_device_is_not_asked_posix_questions(self) -> None:
+        connection = windows_connection()
+        asyncio.run(detect_platform(connection))
+        self.assertEqual(1, len(connection.commands))
+        self.assertNotIn("openwrt_release", connection.commands[0])
+
+    def test_foreign_answer_with_zero_code_is_ignored(self) -> None:
+        """Оболочка могла проглотить текст пробы и вернуть нулевой код."""
+        connection = FakeConnection(
+            [
+                ("$PSVersionTable", "мусор\n", 0),
+                ("openwrt_release", "linux\nUbuntu 24.04\n", 0),
+            ]
+        )
+        self.assertEqual(("linux", "Ubuntu 24.04"), asyncio.run(detect_platform(connection)))
+
+    def test_windows_without_description_keeps_platform(self) -> None:
+        connection = FakeConnection([("$PSVersionTable", "windows\n", 0)])
+        self.assertEqual(("windows", "Windows"), asyncio.run(detect_platform(connection)))
+
+    def test_empty_posix_answer_is_reported(self) -> None:
+        connection = FakeConnection(
+            [("$PSVersionTable", *SHELL_SYNTAX_ERROR), ("openwrt_release", "", 0)]
+        )
+        with self.assertRaises(RuntimeError):
+            asyncio.run(detect_platform(connection))
 
 
 class LogCommandTests(unittest.TestCase):
