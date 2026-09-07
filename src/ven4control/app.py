@@ -284,8 +284,11 @@ class MainWindow(QMainWindow):
         self.background_action = menu.addAction("Работать в фоне до входа в систему")
         self.background_action.setCheckable(True)
         self.background_action.setEnabled(scheduled_task.is_supported())
-        self.background_action.setChecked(scheduled_task.is_enabled())
         self.background_action.toggled.connect(self.toggle_background_task)
+        # Планировщик отвечает через запуск powershell: в основном потоке это
+        # задержало бы появление трея, поэтому галочка выставляется задним
+        # числом, когда ответ придёт.
+        self._check_background_task()
         menu.addSeparator()
         quit_action = menu.addAction("Выйти из Ven4Control")
         quit_action.triggered.connect(self.quit_application)
@@ -322,6 +325,22 @@ class MainWindow(QMainWindow):
             )
             if hasattr(self, "autostart_action"):
                 self.autostart_action.setChecked(autostart.is_enabled())
+
+    def _check_background_task(self) -> None:
+        if not scheduled_task.is_supported():
+            return
+        worker = Worker(scheduled_task.is_enabled)
+        worker.signals.finished.connect(self._show_background_state)
+        self._start_worker(worker)
+
+    def _show_background_state(self, enabled: object) -> None:
+        if not hasattr(self, "background_action"):
+            return
+        # Ответ планировщика — не действие пользователя: обработчик галочки
+        # запускать не нужно.
+        self.background_action.blockSignals(True)
+        self.background_action.setChecked(bool(enabled))
+        self.background_action.blockSignals(False)
 
     def toggle_background_task(self, enabled: bool) -> None:
         """Включает работу до входа в систему: задача в планировщике Windows."""
