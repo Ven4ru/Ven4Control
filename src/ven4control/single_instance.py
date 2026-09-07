@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QObject, Signal
-from PySide6.QtNetwork import QLocalServer, QLocalSocket
+from PySide6.QtNetwork import QAbstractSocket, QLocalServer, QLocalSocket
 
 
 SERVER_NAME = "Ven4Control-instance"
@@ -32,20 +32,31 @@ class SingleInstanceGuard(QObject):
 
     def try_acquire(self) -> bool:
         """True, если процесс стал главным; False — приложение уже работает."""
-        probe = QLocalSocket()
-        probe.connectToServer(self._name)
-        if probe.waitForConnected(CONNECT_TIMEOUT):
-            probe.disconnectFromServer()
+        if self._peer_exists():
             return False
         # Аварийно завершённый процесс оставляет за собой сокет, который иначе
         # навсегда занимает имя и не даёт слушать.
         QLocalServer.removeServer(self._name)
         server = QLocalServer(self)
         if not server.listen(self._name):
-            # Работа без защиты от дублирования лучше отказа запуститься.
+            if server.serverError() == QAbstractSocket.SocketError.AddressInUseError:
+                # Имя занято, хотя проверка никого не нашла: главный процесс
+                # успел подняться между проверкой и этой строкой. Спрашиваем
+                # ещё раз, теперь он уже отвечает.
+                return not self._peer_exists()
+            # Отказ по другой причине (права, окружение): работа без защиты от
+            # дублирования лучше отказа запуститься.
             return True
         server.newConnection.connect(self._accept)
         self._server = server
+        return True
+
+    def _peer_exists(self) -> bool:
+        probe = QLocalSocket()
+        probe.connectToServer(self._name)
+        if not probe.waitForConnected(CONNECT_TIMEOUT):
+            return False
+        probe.disconnectFromServer()
         return True
 
     def notify_show(self) -> bool:
