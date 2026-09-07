@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QToolBar, QVBoxLayout, QWidget,
 )
 
-from ven4control import autostart
+from ven4control import autostart, scheduled_task
 from ven4control.control_dialog import DeviceControlDialog
 from ven4control.credentials import CredentialStore
 from ven4control.dialogs import AddDeviceDialog, InstructionsDialog
@@ -27,6 +27,7 @@ from ven4control.rdp_tunnel import (
     tunnel_status_label,
 )
 from ven4control.remote_control import RdpStatus, check_rdp, enable_rdp
+from ven4control.single_instance import SingleInstanceGuard
 from ven4control.ssh_service import (
     ensure_app_key,
     install_public_key,
@@ -280,6 +281,11 @@ class MainWindow(QMainWindow):
         self.autostart_action.setEnabled(autostart.is_supported())
         self.autostart_action.setChecked(autostart.is_enabled())
         self.autostart_action.toggled.connect(self.toggle_autostart)
+        self.background_action = menu.addAction("Работать в фоне до входа в систему")
+        self.background_action.setCheckable(True)
+        self.background_action.setEnabled(scheduled_task.is_supported())
+        self.background_action.setChecked(scheduled_task.is_enabled())
+        self.background_action.toggled.connect(self.toggle_background_task)
         menu.addSeparator()
         quit_action = menu.addAction("Выйти из Ven4Control")
         quit_action.triggered.connect(self.quit_application)
@@ -316,6 +322,35 @@ class MainWindow(QMainWindow):
             )
             if hasattr(self, "autostart_action"):
                 self.autostart_action.setChecked(autostart.is_enabled())
+
+    def toggle_background_task(self, enabled: bool) -> None:
+        """Включает работу до входа в систему: задача в планировщике Windows."""
+        if enabled:
+            QMessageBox.information(
+                self,
+                "Требуется подтверждение",
+                "Windows один раз спросит права администратора, чтобы создать "
+                "задачу в планировщике. После этого Ven4Control будет "
+                "подниматься при загрузке компьютера, даже если никто не вошёл "
+                "в систему.",
+            )
+        try:
+            if enabled:
+                scheduled_task.enable()
+            else:
+                scheduled_task.disable()
+        except (OSError, RuntimeError) as error:
+            QMessageBox.warning(
+                self,
+                "Задача планировщика не изменена",
+                f"Не удалось настроить задачу: {error}",
+            )
+            if hasattr(self, "background_action"):
+                # Без блокировки сигнала возврат галочки вызвал бы обработчик
+                # ещё раз и запросил бы права администратора повторно.
+                self.background_action.blockSignals(True)
+                self.background_action.setChecked(scheduled_task.is_enabled())
+                self.background_action.blockSignals(False)
 
     def _update_tray(self) -> None:
         if self.tray is None:
@@ -1044,6 +1079,12 @@ class MainWindow(QMainWindow):
 def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("Ven4Control")
+    guard = SingleInstanceGuard()
+    if not guard.try_acquire():
+        # Приложение уже поднято задачей планировщика: второй процесс открыл бы
+        # свои SSH-сессии к тем же устройствам. Выходим до создания окна.
+        guard.notify_show()
+        return 0
     icon_path = resource_path("ven4control.ico")
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
@@ -1053,6 +1094,7 @@ def main() -> int:
         # Без окна traceback уходил в никуда: сборка запускается без консоли.
         QMessageBox.critical(None, "Ven4Control не запустился", str(error))
         return 1
+    guard.show_requested.connect(window.show_from_tray)
     # Запуск при входе в Windows поднимает фоновые сессии и остаётся в трее.
     if autostart.TRAY_ARGUMENT not in sys.argv or window.tray is None:
         window.show()
