@@ -47,6 +47,36 @@ def terminal_command(device: Device) -> list[str]:
     return args
 
 
+def rdp_command(device: Device) -> list[str]:
+    """Аргументы mstsc для подключения к устройству по RDP."""
+    host = device.host
+    # IPv6-адрес в /v: нужно брать в скобки, иначе mstsc принимает
+    # последнюю группу адреса за номер порта.
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return ["mstsc.exe", f"/v:{host}:{device.rdp_port}"]
+
+
+def apply_rdp_result(device: Device, available: bool) -> bool:
+    """Запоминает результат проверки RDP в устройстве.
+
+    Возвращает True, если состояние изменилось и запись нужно сохранить
+    в базу; повторная проверка с тем же результатом ничего не переписывает.
+    """
+    if device.rdp_checked and device.rdp_available == available:
+        return False
+    device.rdp_checked = True
+    device.rdp_available = available
+    return True
+
+
+def rdp_check_label(device: Device | None) -> str:
+    """Текст кнопки проверки RDP для трёх состояний устройства."""
+    if device is not None and device.rdp_checked and not device.rdp_available:
+        return "RDP не отвечает — проверить снова"
+    return "Проверить RDP"
+
+
 def tailscale_candidates(
     status: dict,
     existing: set[tuple[str, int]],
@@ -467,6 +497,15 @@ class MainWindow(QMainWindow):
         except OSError as error:
             QMessageBox.warning(
                 self, "Терминал не запущен", f"Не удалось запустить ssh: {error}"
+            )
+
+    def open_rdp(self, device: Device) -> None:
+        """Запускает клиент RDP. Фолбэк не нужен: mstsc есть в любой Windows."""
+        try:
+            subprocess.Popen(rdp_command(device))
+        except OSError as error:
+            QMessageBox.warning(
+                self, "RDP не запущен", f"Не удалось запустить mstsc: {error}"
             )
 
     def selected_device(self) -> Device | None:
