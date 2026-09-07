@@ -13,6 +13,8 @@ from __future__ import annotations
 import base64
 import os
 import subprocess
+import tempfile
+from pathlib import Path
 
 from ven4control import autostart
 
@@ -53,16 +55,22 @@ def _require_windows() -> None:
 
 
 def current_user() -> str:
-    """Имя текущего пользователя в виде, понятном планировщику."""
-    name = os.environ.get("USERNAME", "")
-    domain = os.environ.get("USERDOMAIN", "")
-    if name and domain:
-        return f"{domain}\\{name}"
-    if name:
-        return name
-    import getpass
+    """Имя текущего пользователя в виде, понятном планировщику.
 
-    return getpass.getuser()
+    Область берётся из имени компьютера, а не из `USERDOMAIN`: на машине вне
+    домена там лежит имя рабочей группы (`WORKGROUP`), которое планировщик
+    не сопоставляет с учётной записью и отвечает 0x80070534. Имя компьютера
+    совпадает с тем, что показывает `whoami`, и резолвится всегда.
+    """
+    name = os.environ.get("USERNAME", "")
+    if not name:
+        import getpass
+
+        name = getpass.getuser()
+    computer = os.environ.get("COMPUTERNAME", "")
+    if computer:
+        return f"{computer}\\{name}"
+    return name
 
 
 def _quoted(value: str) -> str:
@@ -122,6 +130,24 @@ def build_state_script(task_name: str = TASK_NAME) -> str:
         "-ErrorAction SilentlyContinue) "
         f"{{ Write-Output '{STATE_MARKER}=1' }} "
         f"else {{ Write-Output '{STATE_MARKER}=0' }}"
+    )
+
+
+def build_error_report(script: str, error_path: str) -> str:
+    """Оборачивает скрипт записью причины отказа в файл.
+
+    Повышенный процесс запускается через ShellExecuteEx и своего вывода
+    родителю не отдаёт — это ограничение Windows. Без файла от неудачной
+    регистрации оставался бы только код возврата, по которому нечего чинить.
+    """
+    return (
+        "try {\n"
+        f"{script}\n"
+        "} catch {\n"
+        f"$_.Exception.Message | Out-File -FilePath {_quoted(error_path)} "
+        "-Encoding utf8\n"
+        "exit 1\n"
+        "}\n"
     )
 
 
@@ -228,15 +254,45 @@ def _run_elevated(arguments: list[str]) -> None:
         kernel32.CloseHandle(handle)
 
 
+def _reported_error(path: str) -> str:
+    try:
+        # Out-File в Windows PowerShell пишет UTF-8 с меткой порядка байтов.
+        text = Path(path).read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return ""
+    return " ".join(text.split())
+
+
+def _run_with_report(script: str) -> None:
+    """Выполняет скрипт с правами администратора, сохраняя причину отказа."""
+    handle, error_path = tempfile.mkstemp(prefix="ven4control-task-", suffix=".txt")
+    os.close(handle)
+    try:
+        try:
+            _run_elevated(build_arguments(build_error_report(script, error_path)))
+        except OSError as error:
+            detail = _reported_error(error_path)
+            if detail:
+                raise OSError(f"{error}. {detail}") from error
+            raise
+    finally:
+        try:
+            os.unlink(error_path)
+        except OSError:
+            # Файл создан повышенным процессом: неудача уборки не повод
+            # сообщать об ошибке настройки задачи.
+            pass
+
+
 def enable(command: str | None = None, task_name: str = TASK_NAME) -> None:
     """Регистрирует задачу. Требует одного подтверждения UAC."""
     _require_windows()
     script = build_register_script(
         command or autostart.startup_command(), current_user(), task_name
     )
-    _run_elevated(build_arguments(script))
+    _run_with_report(script)
 
 
 def disable(task_name: str = TASK_NAME) -> None:
     _require_windows()
-    _run_elevated(build_arguments(build_unregister_script(task_name)))
+    _run_with_report(build_unregister_script(task_name))
