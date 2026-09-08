@@ -8,6 +8,7 @@ from ven4control.remote_control import (
     MAX_LOG_LINES,
     METRICS_COMMAND,
     MIN_LOG_LINES,
+    PackageResult,
     _first_health_message,
     build_backup_command,
     build_log_command,
@@ -15,10 +16,15 @@ from ven4control.remote_control import (
     collect_overview,
     detect_platform,
     enable_rdp,
+    install_package,
     is_rdp_enabled,
+    parse_apk_search,
+    parse_apt_search,
     parse_metrics,
+    parse_opkg_search,
     parse_rdp_state,
     parse_systemd_services,
+    search_packages,
 )
 
 
@@ -384,6 +390,122 @@ class OverviewTests(unittest.TestCase):
         self.assertEqual("118/247 MiB (47.8%)", overview.memory)
         self.assertEqual("0.3/1.8 GiB (17%)", overview.disk)
         self.assertEqual("up 3 days, 4 hours", overview.uptime)
+
+
+class ApkSearchParsingTests(unittest.TestCase):
+    """Строки — реальный вывод `apk search -v -d sftp` с домашнего роутера
+    (192.168.1.1, OpenWrt 25.12.0, apk-tools 3.0.2), не выдуманы."""
+
+    def test_real_output_from_a_live_router(self) -> None:
+        output = (
+            "announce-1.0.1-r1 - Announce services on the network with "
+            "Zeroconf/Bonjour.\n"
+            "erlang-ssh-28.0.3-r1 - Erlang/OTP implementation of the Secure "
+            "Shell protocol, with SSH & SFTP support.\n"
+            "openssh-sftp-avahi-service-10.3_p1-r1 - This package contains "
+            "the service definition for announcing SFTP support via "
+            "mDNS/DNS-SD.\n"
+            "openssh-sftp-client-10.3_p1-r1 - OpenSSH SFTP client.\n"
+        )
+        results = parse_apk_search(output)
+        self.assertEqual(
+            ["announce", "erlang-ssh", "openssh-sftp-avahi-service", "openssh-sftp-client"],
+            [item.name for item in results],
+        )
+        self.assertEqual("OpenSSH SFTP client.", results[3].description)
+        self.assertIsInstance(results[0], PackageResult)
+
+    def test_version_suffix_is_stripped_from_the_name(self) -> None:
+        # Живая находка: apk add с версией в имени (как в выводе search без -q)
+        # падает с «no such package» — install должен получать чистое имя.
+        results = parse_apk_search("vsftpd-3.0.5-r6 - FTP server.\n")
+        self.assertEqual("vsftpd", results[0].name)
+
+    def test_multi_word_version_suffix(self) -> None:
+        # openssh-sftp-server-10.3_p1-r1: версия «10.3_p1» с подчёркиванием —
+        # не просто «X.Y.Z», эвристика должна справляться и с этим.
+        results = parse_apk_search(
+            "openssh-sftp-server-10.3_p1-r1 - OpenSSH SFTP server.\n"
+        )
+        self.assertEqual("openssh-sftp-server", results[0].name)
+
+    def test_blank_lines_are_skipped(self) -> None:
+        self.assertEqual([], parse_apk_search("\n\n"))
+
+    def test_no_matches_is_an_empty_list(self) -> None:
+        self.assertEqual([], parse_apk_search(""))
+
+
+class OpkgSearchParsingTests(unittest.TestCase):
+    def test_name_version_description_format(self) -> None:
+        # Формат `opkg list`: "имя - версия - описание" — не проверено на
+        # реальном устройстве (нет доступного opkg-роутера), задокументировано
+        # как предположение по формату, а не подтверждённый факт.
+        output = "openssh-sftp-server - 9.6-r1 - OpenSSH SFTP server\n"
+        results = parse_opkg_search(output)
+        self.assertEqual([("openssh-sftp-server", "OpenSSH SFTP server")],
+                         [(r.name, r.description) for r in results])
+
+    def test_no_matches_is_an_empty_list(self) -> None:
+        self.assertEqual([], parse_opkg_search(""))
+
+
+class AptSearchParsingTests(unittest.TestCase):
+    """Строки — реальный вывод `apt-cache search sftp` с VPS
+    (138.16.152.133, Ubuntu 24.04), не выдуманы."""
+
+    def test_real_output_from_a_live_server(self) -> None:
+        output = (
+            "curl - command line tool for transferring data with URL syntax\n"
+            "gvfs-backends - userspace virtual filesystem - backends\n"
+            "lftp - Sophisticated command-line FTP/HTTP/BitTorrent client "
+            "programs\n"
+        )
+        results = parse_apt_search(output)
+        self.assertEqual(["curl", "gvfs-backends", "lftp"], [r.name for r in results])
+        # Живая находка: описание САМО содержит " - " ("virtual filesystem -
+        # backends") — разбор обязан резать по ПЕРВОМУ разделителю, не по
+        # первому вхождению паттерна где попало.
+        self.assertEqual("userspace virtual filesystem - backends", results[1].description)
+
+    def test_no_matches_is_an_empty_list(self) -> None:
+        self.assertEqual([], parse_apt_search(""))
+
+
+class SearchPackagesTests(unittest.TestCase):
+    def test_apk_device_returns_parsed_results(self) -> None:
+        # Маркер "apk search" — подстрока реальной команды, которую строит
+        # search_packages для платформы openwrt: FakeConnection подставляет
+        # ответ по вхождению маркера в отправленную строку.
+        connection = openwrt_connection(
+            ("apk search", "openssh-sftp-server-10.3_p1-r1 - OpenSSH SFTP server.\n", 0)
+        )
+        with patched_connect(connection):
+            results = asyncio.run(search_packages(device(), {}, "sftp"))
+        self.assertEqual("openssh-sftp-server", results[0].name)
+        self.assertTrue(connection.closed)
+
+    def test_search_term_is_shell_escaped(self) -> None:
+        """Защита от command injection: термин уходит одним словом в кавычках."""
+        connection = openwrt_connection(("apk search", "", 0))
+        with patched_connect(connection):
+            asyncio.run(search_packages(device(), {}, "sftp; rm -rf /"))
+        executed = connection.commands[-1]
+        self.assertIn("apk search -v -d 'sftp; rm -rf /'", executed)
+        self.assertNotIn("apk search -v -d sftp;", executed)
+        self.assertNotIn("grep -i sftp;", executed)
+
+
+class InstallPackageTests(unittest.TestCase):
+    def test_package_name_is_shell_escaped(self) -> None:
+        # install_package использует _run(..., check=True) — ответ обязан быть
+        # с кодом 0, иначе _run поднимет RuntimeError раньше проверки.
+        connection = openwrt_connection(("apk add", "OK", 0))
+        with patched_connect(connection):
+            asyncio.run(install_package(device(), {}, "pkg`whoami`"))
+        executed = connection.commands[-1]
+        self.assertIn("apk add 'pkg`whoami`'", executed)
+        self.assertNotIn("apk add pkg`whoami`", executed)
 
 
 if __name__ == "__main__":

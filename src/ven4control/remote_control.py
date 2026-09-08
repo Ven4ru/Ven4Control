@@ -1,5 +1,6 @@
 import json
 import re
+import shlex
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -10,6 +11,9 @@ from ven4control.models import Device
 
 
 SERVICE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.@-]+$")
+
+# Номер релиза в конце имени пакета apk: `openssh-sftp-server-10.3_p1-r1`.
+APK_RELEASE_PATTERN = re.compile(r"r\d+")
 
 MIN_LOG_LINES = 20
 MAX_LOG_LINES = 1000
@@ -143,6 +147,78 @@ class ServiceInfo:
     name: str
     state: str
     details: str = ""
+
+
+@dataclass(slots=True)
+class PackageResult:
+    """Один результат поиска пакета: имя, готовое для установки, и описание."""
+
+    name: str
+    description: str = ""
+
+
+def _apk_bare_name(versioned: str) -> str:
+    """Имя пакета apk без версии.
+
+    `apk search` без `-q` печатает `имя-версия-релиз` одной строкой (`apk
+    search -q` даёт чистое имя, но тогда пропадает возможность получить
+    описание в том же вызове — поэтому парсим версию сами). Правило: с
+    конца отрезается релиз вида `rN`, затем сегменты версии, начинающиеся
+    с цифры; имя пакета в apk с цифры не начинается (проверено на реальных
+    примерах: `vsftpd-3.0.5-r6`, `openssh-sftp-server-10.3_p1-r1`,
+    `erlang-ssh-28.0.3-r1`).
+    """
+    parts = versioned.split("-")
+    if len(parts) > 1 and APK_RELEASE_PATTERN.fullmatch(parts[-1]):
+        parts.pop()
+    while len(parts) > 1 and parts[-1][:1].isdigit():
+        parts.pop()
+    return "-".join(parts)
+
+
+def parse_apk_search(output: str) -> list[PackageResult]:
+    """Разбирает вывод `apk search -v -d <термин>`."""
+    results: list[PackageResult] = []
+    for line in output.splitlines():
+        line = line.strip()
+        if not line or " - " not in line:
+            continue
+        versioned, description = line.split(" - ", 1)
+        results.append(PackageResult(_apk_bare_name(versioned.strip()), description.strip()))
+    return results
+
+
+def parse_opkg_search(output: str) -> list[PackageResult]:
+    """Разбирает вывод `opkg list | grep <термин>` — формат `имя - версия - описание`."""
+    results: list[PackageResult] = []
+    for line in output.splitlines():
+        line = line.strip()
+        parts = line.split(" - ", 2)
+        if len(parts) < 2 or not parts[0].strip():
+            continue
+        name = parts[0].strip()
+        description = parts[2].strip() if len(parts) > 2 else ""
+        results.append(PackageResult(name, description))
+    return results
+
+
+def parse_apt_search(output: str) -> list[PackageResult]:
+    """Разбирает вывод `apt-cache search <термин>` — формат `имя - описание`.
+
+    Разрез строго по ПЕРВОМУ ` - `: описание само может содержать этот же
+    разделитель (реальный пример: `gvfs-backends - userspace virtual
+    filesystem - backends`), maxsplit=1 обязателен.
+    """
+    results: list[PackageResult] = []
+    for line in output.splitlines():
+        line = line.strip()
+        if " - " not in line:
+            continue
+        name, description = line.split(" - ", 1)
+        name = name.strip()
+        if name:
+            results.append(PackageResult(name, description.strip()))
+    return results
 
 
 @dataclass(slots=True)
@@ -606,6 +682,76 @@ async def update_packages(
             )
         result = await _run(connection, command, timeout=1800, check=True)
         return result.stdout.strip() or "Обновление пакетов завершено."
+    finally:
+        connection.close()
+        await connection.wait_closed()
+
+
+async def search_packages(
+    device: Device,
+    credentials: dict[str, str],
+    term: str,
+) -> list[PackageResult]:
+    """Ищет пакет в уже настроенных на устройстве репозиториях."""
+    connection = await _connect(device, credentials)
+    try:
+        platform, _ = await detect_platform(connection)
+        safe_term = shlex.quote(term)
+        if platform == "openwrt":
+            command = (
+                "if command -v apk >/dev/null 2>&1; then "
+                "apk update >/dev/null 2>&1; "
+                f"apk search -v -d {safe_term} 2>/dev/null; "
+                "elif command -v opkg >/dev/null 2>&1; then "
+                "opkg update >/dev/null 2>&1; "
+                f"opkg list 2>/dev/null | grep -i {safe_term}; "
+                "else echo 'Менеджер пакетов не найден' >&2; exit 127; fi"
+            )
+            parser = parse_apk_search
+        else:
+            command = (
+                "sudo -n apt-get update >/dev/null 2>&1; "
+                f"apt-cache search {safe_term}"
+            )
+            parser = parse_apt_search
+        result = await _run(connection, command, timeout=30, check=False)
+        # Ненулевой код при пустом выводе — настоящий сбой; ненулевой код при
+        # непустом выводе даёт grep opkg-ветки, когда совпадений нет, и это
+        # не ошибка.
+        if result.exit_status not in (0, None) and not result.stdout.strip():
+            detail = (result.stderr or "").strip()
+            raise RuntimeError(detail or "Поиск не выполнен.")
+        return parser(result.stdout)
+    finally:
+        connection.close()
+        await connection.wait_closed()
+
+
+async def install_package(
+    device: Device,
+    credentials: dict[str, str],
+    name: str,
+) -> str:
+    """Устанавливает пакет по имени, полученному из результатов поиска."""
+    connection = await _connect(device, credentials)
+    try:
+        platform, _ = await detect_platform(connection)
+        safe_name = shlex.quote(name)
+        if platform == "openwrt":
+            command = (
+                "if command -v apk >/dev/null 2>&1; then "
+                f"apk add {safe_name}; "
+                "elif command -v opkg >/dev/null 2>&1; then "
+                f"opkg install {safe_name}; "
+                "else echo 'Менеджер пакетов не найден' >&2; exit 127; fi"
+            )
+        else:
+            command = (
+                "sudo -n env DEBIAN_FRONTEND=noninteractive "
+                f"apt-get install -y {safe_name}"
+            )
+        result = await _run(connection, command, timeout=300, check=True)
+        return result.stdout.strip() or f"Пакет «{name}» установлен."
     finally:
         connection.close()
         await connection.wait_closed()
