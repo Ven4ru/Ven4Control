@@ -78,6 +78,11 @@ class StylesheetTests(unittest.TestCase):
         self.assertIn("#contentHeader", css)
         self.assertIn("#brandStrip", css)
 
+    def test_stylesheet_styles_the_section_toggle(self) -> None:
+        css = stylesheet_for(DEFAULT_THEME)
+        self.assertIn("#sectionToggle", css)
+        self.assertNotIn("eyebrow", css)
+
 
 class _FakeApp:
     def __init__(self) -> None:

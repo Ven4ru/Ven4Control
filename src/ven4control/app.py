@@ -122,6 +122,12 @@ def online_summary(online: int, total: int) -> str:
     return f"Онлайн: {online} из {total}"
 
 
+def section_header_text(title: str, expanded: bool) -> str:
+    """Текст заголовка-переключателя раздела сайдбара: стрелка + название."""
+    arrow = "▾" if expanded else "▸"
+    return f"{arrow} {title}"
+
+
 def terminal_command(device: Device) -> list[str]:
     """Аргументы ssh для запуска терминала к устройству."""
     args = ["ssh", "-p", str(device.port)]
@@ -230,6 +236,47 @@ class Worker(QRunnable):
             self.signals.failed.emit(str(error))
 
 
+class CollapsibleSection(QWidget):
+    """Раздел сайдбара, который можно свернуть кликом по заголовку.
+
+    Заголовок — QPushButton, не QLabel: клику нужен сигнал, у QLabel его
+    нет. Стиль (без рамки/фона, как ярлык) — в theme.py, #sectionToggle.
+    """
+
+    def __init__(self, title: str, expanded: bool = True, parent=None):
+        super().__init__(parent)
+        self._title = title
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        self._toggle = QPushButton(section_header_text(title, expanded))
+        self._toggle.setObjectName("sectionToggle")
+        self._toggle.setCheckable(True)
+        self._toggle.setChecked(expanded)
+        self._toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._toggle.clicked.connect(self._on_toggled)
+        layout.addWidget(self._toggle)
+
+        self.body = QWidget()
+        self._body_layout = QVBoxLayout(self.body)
+        self._body_layout.setContentsMargins(0, 0, 0, 0)
+        self._body_layout.setSpacing(6)
+        self.body.setVisible(expanded)
+        layout.addWidget(self.body)
+
+    def add_widget(self, widget: QWidget) -> None:
+        self._body_layout.addWidget(widget)
+
+    def set_expanded(self, expanded: bool) -> None:
+        self._toggle.setChecked(expanded)
+        self._on_toggled(expanded)
+
+    def _on_toggled(self, expanded: bool) -> None:
+        self.body.setVisible(expanded)
+        self._toggle.setText(section_header_text(self._title, expanded))
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -314,22 +361,23 @@ class MainWindow(QMainWindow):
         sidebar_layout.addLayout(brand_row)
         sidebar_layout.addSpacing(10)
 
-        sidebar_layout.addWidget(self._section_label("УСТРОЙСТВА"))
+        devices_section = CollapsibleSection("УСТРОЙСТВА", expanded=True)
         add_button = QPushButton("Добавить")
         add_button.clicked.connect(self.add_device)
         refresh_button = QPushButton("Обновить")
         refresh_button.clicked.connect(self.refresh_statuses)
         tailscale_button = QPushButton("Импорт Tailscale")
         tailscale_button.clicked.connect(self.import_tailscale)
-        sidebar_layout.addWidget(add_button)
-        sidebar_layout.addWidget(refresh_button)
-        sidebar_layout.addWidget(tailscale_button)
+        devices_section.add_widget(add_button)
+        devices_section.add_widget(refresh_button)
+        devices_section.add_widget(tailscale_button)
+        sidebar_layout.addWidget(devices_section)
 
         sidebar_layout.addSpacing(10)
-        sidebar_layout.addWidget(self._section_label("ВЫБРАННОЕ УСТРОЙСТВО"))
+        selected_section = CollapsibleSection("ВЫБРАННОЕ УСТРОЙСТВО", expanded=True)
         self.selected_label = QLabel("Устройство не выбрано")
         self.selected_label.setWordWrap(True)
-        sidebar_layout.addWidget(self.selected_label)
+        selected_section.add_widget(self.selected_label)
         self.terminal_button = QPushButton("Открыть терминал")
         self.terminal_button.clicked.connect(self.open_selected_terminal)
         self.console_button = QPushButton("Встроенный терминал")
@@ -350,28 +398,30 @@ class MainWindow(QMainWindow):
         self.forget_button.clicked.connect(self.forget_selected_credentials)
         self.delete_button = QPushButton("Удалить устройство")
         self.delete_button.clicked.connect(self.delete_selected_device)
-        sidebar_layout.addWidget(self.control_button)
-        sidebar_layout.addWidget(self.logging_button)
-        sidebar_layout.addWidget(self.console_button)
-        sidebar_layout.addWidget(self.terminal_button)
-        sidebar_layout.addWidget(self.rdp_check_button)
-        sidebar_layout.addWidget(self.rdp_enable_button)
-        sidebar_layout.addWidget(self.rdp_button)
-        sidebar_layout.addWidget(self.group_button)
-        sidebar_layout.addWidget(self.forget_button)
-        sidebar_layout.addWidget(self.delete_button)
+        selected_section.add_widget(self.control_button)
+        selected_section.add_widget(self.logging_button)
+        selected_section.add_widget(self.console_button)
+        selected_section.add_widget(self.terminal_button)
+        selected_section.add_widget(self.rdp_check_button)
+        selected_section.add_widget(self.rdp_enable_button)
+        selected_section.add_widget(self.rdp_button)
+        selected_section.add_widget(self.group_button)
+        selected_section.add_widget(self.forget_button)
+        selected_section.add_widget(self.delete_button)
+        sidebar_layout.addWidget(selected_section)
 
         sidebar_layout.addSpacing(10)
-        sidebar_layout.addWidget(self._section_label("МАССОВЫЕ ОПЕРАЦИИ"))
+        self._bulk_section = CollapsibleSection("МАССОВЫЕ ОПЕРАЦИИ", expanded=False)
         self.bulk_label = QLabel("Ничего не отмечено")
         self.bulk_label.setWordWrap(True)
-        sidebar_layout.addWidget(self.bulk_label)
+        self._bulk_section.add_widget(self.bulk_label)
         self.bulk_reboot_button = QPushButton("Перезагрузить выбранные")
         self.bulk_reboot_button.clicked.connect(self.reboot_checked_devices)
         self.bulk_update_button = QPushButton("Обновить пакеты на выбранных")
         self.bulk_update_button.clicked.connect(self.update_checked_devices)
-        sidebar_layout.addWidget(self.bulk_reboot_button)
-        sidebar_layout.addWidget(self.bulk_update_button)
+        self._bulk_section.add_widget(self.bulk_reboot_button)
+        self._bulk_section.add_widget(self.bulk_update_button)
+        sidebar_layout.addWidget(self._bulk_section)
 
         sidebar_layout.addStretch()
         self.status_pill = QLabel(online_summary(0, 0))
@@ -414,12 +464,6 @@ class MainWindow(QMainWindow):
         self._update_selection()
         self.reload()
         self.restore_background_sessions()
-
-    def _section_label(self, text: str) -> QLabel:
-        """Заголовок раздела сайдбара: цвет и размер задаёт QSS темы."""
-        label = QLabel(text)
-        label.setProperty("eyebrow", True)
-        return label
 
     def open_settings(self) -> None:
         SettingsDialog(load_settings(), self).exec()
@@ -715,6 +759,10 @@ class MainWindow(QMainWindow):
         enabled = bool(count) and not self._bulk_expected
         self.bulk_reboot_button.setEnabled(enabled)
         self.bulk_update_button.setEnabled(enabled)
+        # Иначе отметка флажка в свёрнутом разделе осталась бы незаметной:
+        # кнопки стали активны, а самого раздела на экране нет.
+        if count:
+            self._bulk_section.set_expanded(True)
 
     def _row_of(self, device_id: int | None) -> int | None:
         if device_id is None:

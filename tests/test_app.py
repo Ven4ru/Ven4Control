@@ -13,6 +13,7 @@ from ven4control.app import (
     rdp_cell_text,
     rdp_check_label,
     rdp_state,
+    section_header_text,
     tailscale_candidates,
     terminal_command,
 )
@@ -242,6 +243,14 @@ class OnlineSummaryTests(unittest.TestCase):
     def test_none_online_yet(self) -> None:
         # Проверки ещё не пришли (или все офлайн) — 0 из total, не «нет устройств».
         self.assertEqual("Онлайн: 0 из 3", online_summary(0, 3))
+
+
+class SectionHeaderTextTests(unittest.TestCase):
+    def test_expanded_shows_down_arrow(self) -> None:
+        self.assertEqual("▾ УСТРОЙСТВА", section_header_text("УСТРОЙСТВА", True))
+
+    def test_collapsed_shows_right_arrow(self) -> None:
+        self.assertEqual("▸ УСТРОЙСТВА", section_header_text("УСТРОЙСТВА", False))
 
 
 if __name__ == "__main__":
