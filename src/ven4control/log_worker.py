@@ -48,6 +48,7 @@ SNAPSHOT_FIELDS: tuple[tuple[str, str], ...] = (
     ("CPU", "Загрузка CPU"),
     ("MEM", "Память"),
     ("DISK", "Диск"),
+    ("TEMP", "Температура"),
     ("CONNTRACK", "Соединений conntrack"),
 )
 

@@ -27,6 +27,12 @@ LOG_SOURCES: dict[str, tuple[str, str]] = {
 # Показатели системы одной командой: значения возвращаются строками вида
 # «КЛЮЧ=значение». Команда общая для разового обзора и фонового снапшота,
 # чтобы CPU и память считались одинаково в обоих режимах.
+#
+# Температура берётся максимумом по всем зонам /sys/class/thermal: их обычно
+# несколько (ядро, WiFi-радио), и показательна самая горячая. Ошибка awk
+# подавлена и закрыта запасным echo намеренно: термозон может не быть вовсе —
+# тогда шаблон остаётся нераскрытым и awk падает, — а команда выполняется с
+# check=True, поэтому ненулевой код утащил бы за собой и остальные показатели.
 METRICS_COMMAND = r"""
 read t1 i1 <<EOF
 $(awk 'NR==1 {t=0; for(i=2;i<=NF;i++) t+=$i; print t, $5+$6}' /proc/stat)
@@ -43,6 +49,10 @@ awk '/MemTotal:/ {t=$2} /MemAvailable:/ {a=$2} END {
 df -Pk / | awk 'NR==2 {printf "DISK=%.1f/%.1f GiB (%s)\n", $3/1048576, $2/1048576, $5}'
 printf 'UPTIME='
 uptime -p 2>/dev/null || awk '{printf "%.1f hours\n", $1/3600}' /proc/uptime
+printf 'TEMP='
+awk 'FNR==1 && $1+0>0 {if ($1+0>m) m=$1+0} END {
+  if (m) printf "%.1f°C\n", m/1000; else print "нет данных"
+}' /sys/class/thermal/thermal_zone*/temp 2>/dev/null || echo 'нет данных'
 """
 
 
@@ -123,6 +133,7 @@ class SystemOverview:
     cpu: str
     memory: str
     disk: str
+    temperature: str
     tailscale: str
     wireguard: str
 
@@ -371,6 +382,7 @@ async def collect_overview(
             cpu=values.get("CPU", "нет данных"),
             memory=values.get("MEM", "нет данных"),
             disk=values.get("DISK", "нет данных"),
+            temperature=values.get("TEMP", "нет данных"),
             tailscale=tailscale,
             wireguard=wireguard,
         )

@@ -6,14 +6,17 @@ from unittest.mock import patch
 from ven4control.models import Device
 from ven4control.remote_control import (
     MAX_LOG_LINES,
+    METRICS_COMMAND,
     MIN_LOG_LINES,
     _first_health_message,
     build_backup_command,
     build_log_command,
     check_rdp,
+    collect_overview,
     detect_platform,
     enable_rdp,
     is_rdp_enabled,
+    parse_metrics,
     parse_rdp_state,
     parse_systemd_services,
 )
@@ -325,6 +328,62 @@ class TailscaleHealthTests(unittest.TestCase):
     def test_missing_health_is_empty(self) -> None:
         self.assertEqual("", _first_health_message(None))
         self.assertEqual("", _first_health_message([]))
+
+
+# Ответ METRICS_COMMAND с реального роутера: по строке на показатель.
+METRICS_ANSWER = (
+    "CPU=7.4%\n"
+    "MEM=118/247 MiB (47.8%)\n"
+    "DISK=0.3/1.8 GiB (17%)\n"
+    "UPTIME=up 3 days, 4 hours\n"
+    "TEMP=42.5°C\n"
+)
+
+
+class MetricsCommandTests(unittest.TestCase):
+    def test_every_metric_prints_on_its_own_line(self) -> None:
+        """Защита от склейки: показатель, пришитый к соседнему, не разберётся."""
+        lines = METRICS_COMMAND.splitlines()
+        self.assertIn("printf 'UPTIME='", lines)
+        self.assertIn("printf 'TEMP='", lines)
+        self.assertTrue(METRICS_COMMAND.endswith("\n"))
+
+    def test_temperature_reads_thermal_zones_and_never_fails(self) -> None:
+        self.assertIn("/sys/class/thermal/thermal_zone*/temp", METRICS_COMMAND)
+        self.assertIn("|| echo 'нет данных'", METRICS_COMMAND)
+
+    def test_full_answer_is_parsed_into_every_key(self) -> None:
+        self.assertEqual(
+            {
+                "CPU": "7.4%",
+                "MEM": "118/247 MiB (47.8%)",
+                "DISK": "0.3/1.8 GiB (17%)",
+                "UPTIME": "up 3 days, 4 hours",
+                "TEMP": "42.5°C",
+            },
+            parse_metrics(METRICS_ANSWER),
+        )
+
+
+class OverviewTests(unittest.TestCase):
+    def test_temperature_reaches_the_overview(self) -> None:
+        connection = openwrt_connection(("/proc/stat", METRICS_ANSWER, 0))
+        with patched_connect(connection):
+            overview = asyncio.run(collect_overview(device(), {}))
+        self.assertEqual("42.5°C", overview.temperature)
+        self.assertEqual("7.4%", overview.cpu)
+        self.assertTrue(connection.closed)
+
+    def test_device_without_sensor_keeps_the_other_metrics(self) -> None:
+        without_temp = METRICS_ANSWER.replace("TEMP=42.5°C\n", "")
+        connection = openwrt_connection(("/proc/stat", without_temp, 0))
+        with patched_connect(connection):
+            overview = asyncio.run(collect_overview(device(), {}))
+        self.assertEqual("нет данных", overview.temperature)
+        self.assertEqual("7.4%", overview.cpu)
+        self.assertEqual("118/247 MiB (47.8%)", overview.memory)
+        self.assertEqual("0.3/1.8 GiB (17%)", overview.disk)
+        self.assertEqual("up 3 days, 4 hours", overview.uptime)
 
 
 if __name__ == "__main__":

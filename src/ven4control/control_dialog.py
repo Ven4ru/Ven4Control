@@ -122,6 +122,7 @@ class DeviceControlDialog(QDialog):
             ("cpu", "Загрузка CPU"),
             ("memory", "Память"),
             ("disk", "Диск"),
+            ("temperature", "Температура"),
             ("tailscale", "Tailscale"),
             ("wireguard", "WireGuard"),
         ]
@@ -397,6 +398,7 @@ class DeviceControlDialog(QDialog):
         self.overview_labels["cpu"].setText(overview.cpu)
         self.overview_labels["memory"].setText(overview.memory)
         self.overview_labels["disk"].setText(overview.disk)
+        self.overview_labels["temperature"].setText(overview.temperature)
         self.overview_labels["tailscale"].setText(overview.tailscale)
         self.overview_labels["wireguard"].setText(overview.wireguard)
 
