@@ -117,6 +117,7 @@ class DeviceControlDialog(QDialog):
         nav_layout.setSpacing(4)
 
         self.files_page = self._create_files_tab()
+        self.apps_page = self._create_apps_tab()
         page_titles = [
             ("Обзор", self._create_overview_tab()),
             ("Сервисы", self._create_services_tab()),
@@ -124,7 +125,7 @@ class DeviceControlDialog(QDialog):
             ("Фоновый журнал", self._create_background_tab()),
             ("Файлы", self.files_page),
             ("Обслуживание", self._create_maintenance_tab()),
-            ("Приложения", self._create_apps_tab()),
+            ("Приложения", self.apps_page),
         ]
         self._nav_buttons: list[QPushButton] = []
         for title_text, page in page_titles:
@@ -440,6 +441,8 @@ class DeviceControlDialog(QDialog):
             button.style().polish(button)
         if self.pages.widget(index) is self.files_page:
             self._start_files_session()
+        if self.pages.widget(index) is self.apps_page:
+            self._load_starter_catalog()
 
     def _start_files_session(self) -> None:
         if self.files_started:
@@ -655,6 +658,7 @@ class DeviceControlDialog(QDialog):
         layout.addWidget(ven4tools_button)
 
         self._apps_results: list[PackageResult] = []
+        self._apps_catalog_loaded = False
         return page
 
     def search_apps(self) -> None:
@@ -670,14 +674,42 @@ class DeviceControlDialog(QDialog):
 
     def _apps_search_done(self, result: object) -> None:
         results = result if isinstance(result, list) else []
+        self._fill_apps_table(results)
+        self.apps_output.setPlainText(
+            f"Найдено: {len(results)}" if results else "Ничего не найдено."
+        )
+
+    def _load_starter_catalog(self) -> None:
+        # Один раз при первом заходе на страницу — тот же приём, что и у
+        # SFTP-сессии на «Файлы»: не платить за него, если пользователь
+        # на эту страницу вообще не зайдёт. Каталог без фильтра существует
+        # только у Linux/OpenWrt (apk/apt сами перечисляют всё при пустом
+        # паттерне) — на Windows `search_packages` в этом случае вернёт
+        # пустой список сама, без сетевого похода.
+        if self._apps_catalog_loaded:
+            return
+        self._apps_catalog_loaded = True
+        self._start(
+            lambda: search_packages(self.device, self.credentials, "", limit=200),
+            self._apps_catalog_done,
+            "Загрузка стартового каталога…",
+        )
+
+    def _apps_catalog_done(self, result: object) -> None:
+        results = result if isinstance(result, list) else []
+        self._fill_apps_table(results)
+        if results:
+            self.apps_output.setPlainText(
+                f"Стартовый каталог: показаны первые {len(results)}. "
+                "Введите название или часть описания, чтобы сузить список."
+            )
+
+    def _fill_apps_table(self, results: list[PackageResult]) -> None:
         self._apps_results = results
         self.apps_table.setRowCount(len(results))
         for row, item in enumerate(results):
             self.apps_table.setItem(row, 0, QTableWidgetItem(item.name))
             self.apps_table.setItem(row, 1, QTableWidgetItem(item.description))
-        self.apps_output.setPlainText(
-            f"Найдено: {len(results)}" if results else "Ничего не найдено."
-        )
 
     def _update_apps_install_button(self) -> None:
         self.apps_install_button.setEnabled(

@@ -537,6 +537,32 @@ class SearchPackagesTests(unittest.TestCase):
         self.assertNotIn("apk search -v -d sftp;", executed)
         self.assertNotIn("grep -i sftp;", executed)
 
+    def test_empty_term_with_limit_lists_the_whole_catalog_capped(self) -> None:
+        # Живая находка: apk/apt при пустом паттерне сами перечисляют весь
+        # каталог (apk называет это "no pattern given, list all packages") —
+        # 10983/85576 строк на реальных устройствах. limit обрезает вывод
+        # НА УСТРОЙСТВЕ через head, чтобы не гонять по SSH то, что всё равно
+        # будет отброшено.
+        connection = openwrt_connection(
+            ("apk search", "pkg-one - one\npkg-two - two\n", 0)
+        )
+        with patched_connect(connection):
+            results = asyncio.run(search_packages(device(), {}, "", limit=200))
+        self.assertEqual(2, len(results))
+        executed = connection.commands[-1]
+        self.assertIn("apk search -v -d ''", executed)
+        self.assertTrue(executed.rstrip().endswith("| head -n 200"))
+
+    def test_windows_empty_term_with_limit_skips_the_network(self) -> None:
+        # Стартовый каталог без фильтра — приём, проверенный только для
+        # apk/apt; для winget пустой запрос не проверялся и не тот же
+        # случай, поэтому запрос на устройство вообще не уходит.
+        connection = windows_connection()
+        with patched_connect(connection):
+            results = asyncio.run(search_packages(device(), {}, "", limit=200))
+        self.assertEqual([], results)
+        self.assertNotIn("winget search", " ".join(connection.commands))
+
 
 class InstallPackageTests(unittest.TestCase):
     def test_package_name_is_shell_escaped(self) -> None:

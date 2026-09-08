@@ -735,13 +735,30 @@ async def search_packages(
     device: Device,
     credentials: dict[str, str],
     term: str,
+    *,
+    limit: int | None = None,
 ) -> list[PackageResult]:
-    """Ищет пакет в уже настроенных на устройстве репозиториях."""
+    """Ищет пакет в уже настроенных на устройстве репозиториях.
+
+    `term=""` — без фильтра: apk/apt в этом случае сами перечисляют весь
+    каталог (проверено живьём: `apk search` без паттерна и с пустой
+    строкой-паттерном возвращают один и тот же список — apk называет это
+    «no pattern given, list all packages»). Каталог настоящий — десятки
+    тысяч строк на apt (85576 живьём на реальном VPS), поэтому `limit`
+    обрезает вывод НА УСТРОЙСТВЕ через `head`, не после передачи по SSH —
+    не гонять по сети то, что всё равно будет отброшено. Для Windows
+    пустой запрос без `limit` не проверялся и не тот же приём, что у
+    Linux/OpenWrt — при пустом `term` с `limit` winget просто пропускается
+    (пустой список), сама возможность стартового каталога — только для
+    Linux/OpenWrt по прямой просьбе пользователя.
+    """
     connection = await _connect(device, credentials)
     try:
         platform, _ = await detect_platform(connection)
         safe_term = shlex.quote(term)
         if platform == "windows":
+            if not term and limit is not None:
+                return []
             command = f"winget search {ps_quote(term)} --accept-source-agreements"
             parser = parse_winget_search
         elif platform == "openwrt":
@@ -761,6 +778,8 @@ async def search_packages(
                 f"apt-cache search {safe_term}"
             )
             parser = parse_apt_search
+        if limit is not None:
+            command = f"{command} | head -n {int(limit)}"
         result = await _run(connection, command, timeout=30, check=False)
         # Ненулевой код при пустом выводе — настоящий сбой; ненулевой код при
         # непустом выводе даёт grep opkg-ветки, когда совпадений нет, и это
