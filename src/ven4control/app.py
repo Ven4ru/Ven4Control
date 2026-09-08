@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from ven4control import autostart, scheduled_task
+from ven4control.ansi_screen import set_default_colors as set_terminal_colors
 from ven4control.control_dialog import DeviceControlDialog
 from ven4control.credentials import CredentialStore
 from ven4control.dialogs import AddDeviceDialog, InstructionsDialog
@@ -35,6 +36,7 @@ from ven4control.remote_control import (
     reboot_device,
     update_packages,
 )
+from ven4control.settings import load_settings
 from ven4control.single_instance import SingleInstanceGuard
 from ven4control.ssh_service import (
     ensure_app_key,
@@ -44,6 +46,7 @@ from ven4control.ssh_service import (
 )
 from ven4control.storage import DeviceStorage
 from ven4control.terminal_dialog import TerminalDialog
+from ven4control.theme import apply_theme, build_palette
 
 
 def resource_path(name: str) -> Path:
@@ -1391,6 +1394,10 @@ class MainWindow(QMainWindow):
 def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("Ven4Control")
+    settings = load_settings()
+    apply_theme(app, settings.theme)
+    palette = build_palette(settings.theme)
+    set_terminal_colors(palette["content_background"], palette["text_primary"])
     guard = SingleInstanceGuard()
     if not guard.try_acquire():
         # Приложение уже поднято задачей планировщика: второй процесс открыл бы

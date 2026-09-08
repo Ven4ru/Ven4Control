@@ -2,10 +2,14 @@ from collections.abc import Sequence
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QCompleter, QDialog, QDialogButtonBox, QFileDialog,
-    QFormLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSpinBox,
-    QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QCompleter, QDialog, QDialogButtonBox,
+    QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+    QSpinBox, QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
 )
+
+from ven4control.ansi_screen import set_default_colors as set_terminal_colors
+from ven4control.settings import AppSettings, save_settings
+from ven4control.theme import THEME_LABELS, THEMES, apply_theme, build_palette
 
 from .models import Device
 
@@ -140,3 +144,52 @@ Add-Content "$HOME\\.ssh\\authorized_keys" "{encoded}"
         layout = QVBoxLayout(self)
         layout.addWidget(editor)
         layout.addWidget(buttons)
+
+
+class SettingsDialog(QDialog):
+    """Выбор темы интерфейса. Выбор применяется и сохраняется сразу же."""
+
+    def __init__(self, current_theme: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Настройки")
+        self.resize(360, 320)
+        self.selected_theme = current_theme
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Тема интерфейса"))
+
+        self._buttons: dict[str, QPushButton] = {}
+        for theme in THEMES:
+            accent = build_palette(theme)["accent_color"]
+            button = QPushButton(THEME_LABELS[theme])
+            button.setCheckable(True)
+            button.setChecked(theme == current_theme)
+            # Полоса акцентного цвета слева — тот же приём, что у логотипа
+            # в Ven4Tools: сама кнопка показывает, какой это акцент, а не
+            # только название темы текстом.
+            button.setStyleSheet(
+                f"QPushButton {{ border-left: 4px solid {accent}; "
+                "text-align: left; padding: 10px; }"
+            )
+            button.clicked.connect(lambda _checked, t=theme: self._select(t))
+            self._buttons[theme] = button
+            layout.addWidget(button)
+
+        layout.addStretch()
+        buttons_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons_box.rejected.connect(self.reject)
+        layout.addWidget(buttons_box)
+
+    def _select(self, theme: str) -> None:
+        self.selected_theme = theme
+        for name, button in self._buttons.items():
+            button.setChecked(name == theme)
+        app = QApplication.instance()
+        if app is not None:
+            apply_theme(app, theme)
+        # Без этого терминал, открытый после смены темы в этом же запуске,
+        # оставался бы в цветах старой темы до перезапуска приложения —
+        # main() выставляет эти цвета только один раз, при старте.
+        palette = build_palette(theme)
+        set_terminal_colors(palette["content_background"], palette["text_primary"])
+        save_settings(AppSettings(theme=theme))

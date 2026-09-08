@@ -41,6 +41,19 @@ MAX_SCROLLED_OFF = 5000
 DEFAULT_FOREGROUND = "#d8d8d8"
 DEFAULT_BACKGROUND = "#101014"
 
+
+def set_default_colors(background: str, foreground: str) -> None:
+    """Переопределяет цвета терминала по умолчанию — вызывается при открытии
+    нового терминала с цветами активной темы. Уже отрисованная история
+    существующих терминалов не перекрашивается задним числом: это цвета
+    ПО УМОЛЧАНИЮ (инверсия SGR без явного цвета, фон нового QTextEdit),
+    а не биндинг на тему.
+    """
+    global DEFAULT_BACKGROUND, DEFAULT_FOREGROUND
+    DEFAULT_BACKGROUND = background
+    DEFAULT_FOREGROUND = foreground
+
+
 BASE_COLORS = (
     "#000000", "#cd0000", "#00cd00", "#cdcd00",
     "#3465a4", "#cd00cd", "#00cdcd", "#e5e5e5",
