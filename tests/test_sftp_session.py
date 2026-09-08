@@ -108,8 +108,11 @@ class FakeConnection:
     def __init__(self, client: FakeSftpClient) -> None:
         self.client = client
         self.closed = False
+        self.sftp_error: Exception | None = None
 
     async def start_sftp_client(self) -> FakeSftpClient:
+        if self.sftp_error is not None:
+            raise self.sftp_error
         return self.client
 
     def close(self) -> None:
@@ -283,6 +286,7 @@ class SftpSessionTests(unittest.TestCase):
         self.client = FakeSftpClient({"/root": [FakeName("config")]})
         self.connections: list[FakeConnection] = []
         self.connect_error: Exception | None = None
+        self.sftp_error: Exception | None = None
         self.session: SftpSession | None = None
         self.listings: list[tuple[str, list[RemoteEntry]]] = []
         self.failures: list[str] = []
@@ -297,6 +301,7 @@ class SftpSessionTests(unittest.TestCase):
         if self.connect_error is not None:
             raise self.connect_error
         connection = FakeConnection(self.client)
+        connection.sftp_error = self.sftp_error
         self.connections.append(connection)
         return connection
 
@@ -436,6 +441,29 @@ class SftpSessionTests(unittest.TestCase):
         self.assertIn("fingerprint", self.failures[0])
         self.assertIn("Нет соединения", self.failures[1])
         self.assertEqual([], self.listings)
+
+    def test_missing_sftp_subsystem_is_explained(self) -> None:
+        """Живая находка: dropbear на OpenWrt без openssh-sftp-server рвёт
+
+        канал сразу же в ответ на запрос подсистемы SFTP, и asyncssh поднимает
+        SFTPConnectionLost — на вид неотличимо от обрыва связи, хотя
+        SSH-соединение живо и сеть тут ни при чём.
+        """
+        self.sftp_error = asyncssh.SFTPConnectionLost(
+            "0 bytes read on a total of 4 expected bytes"
+        )
+        session = self._session()
+
+        session.start()
+
+        # Ждём именно сигнал, а не self.status: тот меняется на фоновом
+        # потоке раньше, чем operation_failed доставится в очередь Qt, —
+        # опрос status первым иногда обгонял бы список failures.
+        self.assertTrue(self._wait(lambda: bool(self.failures)))
+        self.assertEqual(STATUS_FAILED, session.status)
+        self.assertEqual(1, len(self.failures))
+        self.assertIn("не поддерживает подсистему SFTP", self.failures[0])
+        self.assertNotIn("потеряно", self.failures[0])
 
     def test_device_without_fingerprint_is_rejected(self) -> None:
         """Файлы — то же доверенное соединение: без fingerprint нельзя."""

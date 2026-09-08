@@ -379,16 +379,32 @@ class SftpSession(QObject):
         async with self._lock:
             try:
                 connection = await self._connect(self.device, self.credentials)
-                self._connection = connection
+            except Exception as error:
+                self._fail_open(describe_error(error))
+                return
+            self._connection = connection
+            try:
                 self._client = await connection.start_sftp_client()
             except Exception as error:
-                self.error = describe_error(error)
-                self._set_status(STATUS_FAILED)
-                self.operation_failed.emit(
-                    f"Файлы устройства недоступны: {self.error}."
-                )
+                # SSH-соединение уже есть — упал именно запрос подсистемы
+                # SFTP. Дропбир (сервер по умолчанию на OpenWrt) без пакета
+                # openssh-sftp-server рвёт канал сразу же, и это выглядит как
+                # обрыв связи (SFTPConnectionLost), хотя сеть тут ни при чём.
+                if isinstance(error, (asyncssh.SFTPConnectionLost, EOFError)):
+                    self._fail_open(
+                        "SSH-сервер устройства не поддерживает подсистему SFTP "
+                        "(частая причина на OpenWrt с dropbear — установите "
+                        "пакет openssh-sftp-server)"
+                    )
+                else:
+                    self._fail_open(describe_error(error))
                 return
             self._set_status(STATUS_READY)
+
+    def _fail_open(self, reason: str) -> None:
+        self.error = reason
+        self._set_status(STATUS_FAILED)
+        self.operation_failed.emit(f"Файлы устройства недоступны: {self.error}.")
 
     async def _list(self, path: str) -> None:
         async with self._lock:
