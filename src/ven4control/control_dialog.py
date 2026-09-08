@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
-    QTabWidget,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -103,25 +103,55 @@ class DeviceControlDialog(QDialog):
             f"<b>{device.name}</b> — {device.username}@{device.host}:{device.port}"
         )
         self.status = QLabel("Готово")
-        self.tabs = QTabWidget()
-        self.tabs.addTab(self._create_overview_tab(), "Обзор")
-        self.tabs.addTab(self._create_services_tab(), "Сервисы")
-        self.tabs.addTab(self._create_logs_tab(), "Логи")
-        self.tabs.addTab(self._create_background_tab(), "Фоновый журнал")
+        self.pages = QStackedWidget()
+        nav_panel = QWidget()
+        nav_panel.setObjectName("dialogNav")
+        nav_panel.setFixedWidth(170)
+        nav_layout = QVBoxLayout(nav_panel)
+        nav_layout.setContentsMargins(8, 8, 8, 8)
+        nav_layout.setSpacing(4)
+
         self.files_page = self._create_files_tab()
-        self.tabs.addTab(self.files_page, "Файлы")
-        self.tabs.addTab(self._create_maintenance_tab(), "Обслуживание")
+        page_titles = [
+            ("Обзор", self._create_overview_tab()),
+            ("Сервисы", self._create_services_tab()),
+            ("Логи", self._create_logs_tab()),
+            ("Фоновый журнал", self._create_background_tab()),
+            ("Файлы", self.files_page),
+            ("Обслуживание", self._create_maintenance_tab()),
+        ]
+        self._nav_buttons: list[QPushButton] = []
+        for title_text, page in page_titles:
+            button = QPushButton(title_text)
+            button.setProperty("nav", True)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            index = self.pages.count()
+            button.clicked.connect(
+                lambda _checked, i=index: self.pages.setCurrentIndex(i)
+            )
+            nav_layout.addWidget(button)
+            self._nav_buttons.append(button)
+            self.pages.addWidget(page)
+        nav_layout.addStretch()
+
         # SFTP-соединение открывается только когда его действительно
-        # попросили: за обзором и логами пользователь на вкладку файлов
+        # попросили: за обзором и логами пользователь на страницу файлов
         # может не зайти ни разу.
-        self.tabs.currentChanged.connect(self._tab_changed)
+        self.pages.currentChanged.connect(self._page_changed)
+        self._page_changed(0)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(self.reject)
 
+        content_row = QHBoxLayout()
+        content_row.setContentsMargins(0, 0, 0, 0)
+        content_row.setSpacing(0)
+        content_row.addWidget(nav_panel)
+        content_row.addWidget(self.pages, 1)
+
         layout = QVBoxLayout(self)
         layout.addWidget(title)
-        layout.addWidget(self.tabs, 1)
+        layout.addLayout(content_row, 1)
         layout.addWidget(self.status)
         layout.addWidget(buttons)
         self.refresh_overview()
@@ -394,8 +424,15 @@ class DeviceControlDialog(QDialog):
         self._update_files_controls()
         return page
 
-    def _tab_changed(self, index: int) -> None:
-        if self.tabs.widget(index) is self.files_page:
+    def _page_changed(self, index: int) -> None:
+        # Активная кнопка навигации — уже показанный виджет, свойство
+        # меняется в рантайме, а не при создании — unpolish/polish
+        # обязательны, иначе QSS не переоценит селектор.
+        for i, button in enumerate(self._nav_buttons):
+            button.setProperty("navActive", i == index)
+            button.style().unpolish(button)
+            button.style().polish(button)
+        if self.pages.widget(index) is self.files_page:
             self._start_files_session()
 
     def _start_files_session(self) -> None:
