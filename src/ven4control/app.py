@@ -2,13 +2,15 @@ import asyncio
 import json
 import subprocess
 import sys
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal, Slot
 from PySide6.QtGui import QAction, QCloseEvent, QIcon
 from PySide6.QtWidgets import (
-    QApplication, QHBoxLayout, QHeaderView, QLabel, QMainWindow, QMenu,
-    QMessageBox, QPushButton, QStyle, QSystemTrayIcon, QTableWidget,
+    QApplication, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QMainWindow,
+    QMenu, QMessageBox, QPushButton, QStyle, QSystemTrayIcon, QTableWidget,
     QTableWidgetItem, QToolBar, QVBoxLayout, QWidget,
 )
 
@@ -26,7 +28,13 @@ from ven4control.rdp_tunnel import (
     tunnel_manager,
     tunnel_status_label,
 )
-from ven4control.remote_control import RdpStatus, check_rdp, enable_rdp
+from ven4control.remote_control import (
+    RdpStatus,
+    check_rdp,
+    enable_rdp,
+    reboot_device,
+    update_packages,
+)
 from ven4control.single_instance import SingleInstanceGuard
 from ven4control.ssh_service import (
     ensure_app_key,
@@ -45,6 +53,63 @@ def resource_path(name: str) -> Path:
         return bundled
     # Запуск из репозитория: ресурсы лежат рядом с исходниками.
     return Path(__file__).resolve().parents[2] / "assets" / name
+
+
+# Столбцы списка устройств. Флажок массового выбора стоит первым и живёт
+# отдельно от выделения строки: обычный выбор устройства остаётся одиночным.
+COL_CHECK = 0
+COL_NAME = 1
+COL_GROUP = 2
+COL_HOST = 3
+COL_USER = 4
+COL_STATUS = 5
+COL_LATENCY = 6
+COL_LOGGING = 7
+COL_RDP = 8
+COLUMN_COUNT = 9
+
+# Вывод обновления пакетов занимает сотни строк: в общий отчёт помещается
+# только начало, иначе одно устройство вытеснит из окна все остальные.
+BULK_MESSAGE_LIMIT = 300
+
+
+@dataclass(frozen=True, slots=True)
+class BulkResult:
+    """Итог массовой операции на одном устройстве."""
+
+    device_name: str
+    success: bool
+    message: str
+
+
+def bulk_report(results: Sequence[BulkResult]) -> str:
+    """Собирает отчёт массовой операции: по строке на каждое устройство."""
+    if not results:
+        return "Ни одно устройство не было затронуто."
+    failed = [item for item in results if not item.success]
+    if failed:
+        header = (
+            f"Выполнено: {len(results) - len(failed)} из {len(results)}, "
+            f"с ошибкой: {len(failed)}."
+        )
+    else:
+        header = f"Операция выполнена на всех устройствах: {len(results)}."
+    lines = [
+        f"{'✔' if item.success else '✖'} {item.device_name} — "
+        f"{_single_line(item.message)}"
+        for item in results
+    ]
+    return header + "\n\n" + "\n".join(lines)
+
+
+def _single_line(message: str) -> str:
+    """Сжимает многострочный вывод команды в одну строку отчёта."""
+    collapsed = " ".join(message.split())
+    if not collapsed:
+        return "без ответа"
+    if len(collapsed) > BULK_MESSAGE_LIMIT:
+        return collapsed[:BULK_MESSAGE_LIMIT] + "…"
+    return collapsed
 
 
 def terminal_command(device: Device) -> list[str]:
@@ -189,24 +254,38 @@ class MainWindow(QMainWindow):
         # Счётчик перезагрузок списка: ответы старых проверок отбрасываются,
         # иначе состояние попадало в строку уже другого устройства.
         self.status_generation = 0
+        # Отмеченные флажками устройства для массовых операций. Набор ведётся
+        # по идентификаторам, а не по строкам: таблица пересобирается
+        # при каждом reload(), а отметки должны это пережить.
+        self.checked_device_ids: set[int] = set()
+        # Заполнение таблицы тоже меняет флажки: без этого признака обработчик
+        # itemChanged посчитал бы перестройку списка действием пользователя.
+        self._filling_table = False
+        # Устройства текущей массовой операции и уже пришедшие ответы.
+        self._bulk_expected: list[Device] = []
+        self._bulk_results: dict[int, BulkResult] = {}
+        self._bulk_title = ""
 
-        self.table = QTableWidget(0, 7)
+        self.table = QTableWidget(0, COLUMN_COUNT)
         self.table.setHorizontalHeaderLabels(
             [
-                "Устройство", "Адрес", "Пользователь", "Состояние", "Задержка",
-                "Логирование", "RDP",
+                "✓", "Устройство", "Группа", "Адрес", "Пользователь", "Состояние",
+                "Задержка", "Логирование", "RDP",
             ]
         )
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(COL_CHECK, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(COL_NAME, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(COL_HOST, QHeaderView.ResizeMode.Stretch)
         self.table.itemSelectionChanged.connect(self._update_selection)
+        self.table.itemChanged.connect(self._table_item_changed)
 
         action_panel = QWidget()
         action_panel.setMinimumWidth(190)
-        action_panel.setMaximumWidth(230)
+        action_panel.setMaximumWidth(260)
         action_layout = QVBoxLayout(action_panel)
         action_layout.addWidget(QLabel("Действия"))
         self.selected_label = QLabel("Устройство не выбрано")
@@ -226,6 +305,8 @@ class MainWindow(QMainWindow):
         self.rdp_enable_button.clicked.connect(self.enable_selected_rdp)
         self.rdp_button = QPushButton("🖥️ RDP")
         self.rdp_button.clicked.connect(self.open_selected_rdp)
+        self.group_button = QPushButton("Изменить группу")
+        self.group_button.clicked.connect(self.edit_selected_group)
         self.forget_button = QPushButton("Удалить сохранённые данные")
         self.forget_button.clicked.connect(self.forget_selected_credentials)
         self.delete_button = QPushButton("Удалить устройство")
@@ -237,8 +318,21 @@ class MainWindow(QMainWindow):
         action_layout.addWidget(self.rdp_check_button)
         action_layout.addWidget(self.rdp_enable_button)
         action_layout.addWidget(self.rdp_button)
+        action_layout.addWidget(self.group_button)
         action_layout.addWidget(self.forget_button)
         action_layout.addWidget(self.delete_button)
+
+        action_layout.addSpacing(12)
+        action_layout.addWidget(QLabel("Массовые операции"))
+        self.bulk_label = QLabel("Ничего не отмечено")
+        self.bulk_label.setWordWrap(True)
+        action_layout.addWidget(self.bulk_label)
+        self.bulk_reboot_button = QPushButton("Перезагрузить выбранные")
+        self.bulk_reboot_button.clicked.connect(self.reboot_checked_devices)
+        self.bulk_update_button = QPushButton("Обновить пакеты на выбранных")
+        self.bulk_update_button.clicked.connect(self.update_checked_devices)
+        action_layout.addWidget(self.bulk_reboot_button)
+        action_layout.addWidget(self.bulk_update_button)
         action_layout.addStretch()
 
         toolbar = QToolBar()
@@ -405,7 +499,9 @@ class MainWindow(QMainWindow):
         self._update_tray()
         row = self._row_of(device_id)
         if row is not None and row < self.table.rowCount():
-            self.table.setItem(row, 5, QTableWidgetItem(self._logging_text(self.devices[row])))
+            self.table.setItem(
+                row, COL_LOGGING, QTableWidgetItem(self._logging_text(self.devices[row]))
+            )
         selected = self.selected_device()
         if selected is not None and selected.id == device_id:
             self._update_selection()
@@ -420,7 +516,9 @@ class MainWindow(QMainWindow):
     def _tunnel_status_changed(self, device_id: int, _status: str) -> None:
         row = self._row_of(device_id)
         if row is not None and row < self.table.rowCount():
-            self.table.setItem(row, 6, QTableWidgetItem(self._rdp_text(self.devices[row])))
+            self.table.setItem(
+                row, COL_RDP, QTableWidgetItem(self._rdp_text(self.devices[row]))
+            )
         selected = self.selected_device()
         if selected is not None and selected.id == device_id:
             self._update_selection()
@@ -428,7 +526,9 @@ class MainWindow(QMainWindow):
     def _tunnel_closed(self, device_id: int, message: str) -> None:
         row = self._row_of(device_id)
         if row is not None and row < self.table.rowCount():
-            self.table.setItem(row, 6, QTableWidgetItem(self._rdp_text(self.devices[row])))
+            self.table.setItem(
+                row, COL_RDP, QTableWidgetItem(self._rdp_text(self.devices[row]))
+            )
         self._update_selection()
         if self.tray is not None:
             self.tray.showMessage(
@@ -462,20 +562,88 @@ class MainWindow(QMainWindow):
         selected_id = selected.id if selected else None
         self.status_generation += 1
         self.devices = self.storage.list_devices()
-        self.table.setRowCount(len(self.devices))
-        for row, device in enumerate(self.devices):
-            self.table.setItem(row, 0, QTableWidgetItem(device.name))
-            self.table.setItem(row, 1, QTableWidgetItem(f"{device.host}:{device.port}"))
-            self.table.setItem(row, 2, QTableWidgetItem(device.username))
-            self.table.setItem(row, 3, QTableWidgetItem("Проверка…"))
-            self.table.setItem(row, 4, QTableWidgetItem("—"))
-            self.table.setItem(row, 5, QTableWidgetItem(self._logging_text(device)))
-            self.table.setItem(row, 6, QTableWidgetItem(self._rdp_text(device)))
+        # Удалённое устройство не должно оставаться в массовом выборе.
+        self.checked_device_ids &= {
+            device.id for device in self.devices if device.id is not None
+        }
+        # Строки создаются заново, поэтому флажки проставляются из набора
+        # отмеченных устройств, а не читаются из старых ячеек.
+        self._filling_table = True
+        try:
+            self.table.setRowCount(len(self.devices))
+            for row, device in enumerate(self.devices):
+                self.table.setItem(row, COL_CHECK, self._check_item(device))
+                self.table.setItem(row, COL_NAME, QTableWidgetItem(device.name))
+                self.table.setItem(
+                    row, COL_GROUP, QTableWidgetItem(device.group_name or "—")
+                )
+                self.table.setItem(
+                    row, COL_HOST, QTableWidgetItem(f"{device.host}:{device.port}")
+                )
+                self.table.setItem(row, COL_USER, QTableWidgetItem(device.username))
+                self.table.setItem(row, COL_STATUS, QTableWidgetItem("Проверка…"))
+                self.table.setItem(row, COL_LATENCY, QTableWidgetItem("—"))
+                self.table.setItem(
+                    row, COL_LOGGING, QTableWidgetItem(self._logging_text(device))
+                )
+                self.table.setItem(row, COL_RDP, QTableWidgetItem(self._rdp_text(device)))
+        finally:
+            self._filling_table = False
         restored = self._row_of(selected_id)
         if restored is not None:
             self.table.selectRow(restored)
         self._update_selection()
+        self._update_bulk_actions()
         self.refresh_statuses()
+
+    def _check_item(self, device: Device) -> QTableWidgetItem:
+        """Ячейка с флажком массового выбора для строки устройства."""
+        item = QTableWidgetItem()
+        item.setFlags(
+            Qt.ItemFlag.ItemIsEnabled
+            | Qt.ItemFlag.ItemIsSelectable
+            | Qt.ItemFlag.ItemIsUserCheckable
+        )
+        item.setCheckState(
+            Qt.CheckState.Checked
+            if device.id is not None and device.id in self.checked_device_ids
+            else Qt.CheckState.Unchecked
+        )
+        return item
+
+    def _table_item_changed(self, item: QTableWidgetItem) -> None:
+        """Ведёт набор отмеченных устройств по флажкам первого столбца."""
+        if self._filling_table or item.column() != COL_CHECK:
+            return
+        row = item.row()
+        if not 0 <= row < len(self.devices):
+            return
+        device_id = self.devices[row].id
+        if device_id is None:
+            return
+        if item.checkState() == Qt.CheckState.Checked:
+            self.checked_device_ids.add(device_id)
+        else:
+            self.checked_device_ids.discard(device_id)
+        self._update_bulk_actions()
+
+    def checked_devices(self) -> list[Device]:
+        """Отмеченные флажками устройства в порядке списка."""
+        return [
+            device
+            for device in self.devices
+            if device.id is not None and device.id in self.checked_device_ids
+        ]
+
+    def _update_bulk_actions(self) -> None:
+        count = len(self.checked_device_ids)
+        self.bulk_label.setText(
+            f"Отмечено устройств: {count}" if count else "Ничего не отмечено"
+        )
+        # Пока идёт массовая операция, вторая только смешала бы отчёты.
+        enabled = bool(count) and not self._bulk_expected
+        self.bulk_reboot_button.setEnabled(enabled)
+        self.bulk_update_button.setEnabled(enabled)
 
     def _row_of(self, device_id: int | None) -> int | None:
         if device_id is None:
@@ -487,7 +655,7 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def add_device(self) -> None:
-        dialog = AddDeviceDialog(self)
+        dialog = AddDeviceDialog(self, self.known_groups())
         if dialog.exec() != AddDeviceDialog.DialogCode.Accepted:
             return
         device = dialog.device()
@@ -617,8 +785,8 @@ class MainWindow(QMainWindow):
         online, detail = result
         status = QTableWidgetItem("В сети" if online else "Не в сети")
         status.setForeground(Qt.GlobalColor.darkGreen if online else Qt.GlobalColor.red)
-        self.table.setItem(row, 3, status)
-        self.table.setItem(row, 4, QTableWidgetItem(detail if online else "—"))
+        self.table.setItem(row, COL_STATUS, status)
+        self.table.setItem(row, COL_LATENCY, QTableWidgetItem(detail if online else "—"))
 
     def _start_worker(self, worker: Worker) -> None:
         self.workers.add(worker)
@@ -678,13 +846,23 @@ class MainWindow(QMainWindow):
             return self.devices[row]
         return None
 
+    def known_groups(self) -> list[str]:
+        """Уже заведённые группы — для подсказки при вводе новой."""
+        return sorted(
+            {device.group_name for device in self.devices if device.group_name}
+        )
+
     def _update_selection(self) -> None:
         device = self.selected_device()
         enabled = device is not None
-        self.selected_label.setText(
-            f"{device.name}\n{device.username}@{device.host}:{device.port}"
-            if device else "Устройство не выбрано"
-        )
+        if device is None:
+            description = "Устройство не выбрано"
+        else:
+            description = f"{device.name}\n{device.username}@{device.host}:{device.port}"
+            if device.group_name:
+                description += f"\nГруппа: {device.group_name}"
+        self.selected_label.setText(description)
+        self.group_button.setEnabled(enabled)
         self.terminal_button.setEnabled(enabled)
         self.console_button.setEnabled(enabled)
         self.control_button.setEnabled(enabled)
@@ -999,6 +1177,105 @@ class MainWindow(QMainWindow):
             self.reload()
             return
         QMessageBox.information(self, "Данные удалены", "Сохранённые данные подключения удалены.")
+
+    def edit_selected_group(self) -> None:
+        """Меняет группу выбранного устройства, не трогая остальные поля."""
+        device = self.selected_device()
+        if device is None:
+            return
+        answer, accepted = QInputDialog.getText(
+            self,
+            "Группа устройства",
+            f"Группа для «{device.name}» (пусто — без группы):",
+            text=device.group_name,
+        )
+        if not accepted:
+            return
+        group = answer.strip()
+        if group == device.group_name:
+            return
+        previous = device.group_name
+        device.group_name = group
+        try:
+            self.storage.save(device)
+        except Exception as error:
+            # Запись в базу не прошла: в памяти тоже должна остаться старая
+            # группа, иначе список показывал бы несохранённое значение.
+            device.group_name = previous
+            QMessageBox.critical(self, "Группа не сохранена", str(error))
+            return
+        self.reload()
+
+    def reboot_checked_devices(self) -> None:
+        self._start_bulk(
+            "Перезагрузка выбранных устройств",
+            "Устройства будут перезагружены, SSH-соединения с ними разорвутся.",
+            reboot_device,
+        )
+
+    def update_checked_devices(self) -> None:
+        self._start_bulk(
+            "Обновление пакетов на выбранных устройствах",
+            "Будут обновлены индексы и все доступные пакеты. На OpenWrt массовое "
+            "обновление пакетов может быть несовместимо с текущей прошивкой.",
+            update_packages,
+        )
+
+    def _start_bulk(self, title: str, warning: str, operation) -> None:
+        """Запускает операцию на всех отмеченных устройствах независимо.
+
+        Ошибка одного устройства не отменяет остальные: каждое получает свой
+        поток, а итог собирается в общий отчёт, когда ответят все.
+        """
+        if self._bulk_expected:
+            return
+        devices = self.checked_devices()
+        if not devices:
+            return
+        names = "\n".join(f"• {device.name}" for device in devices)
+        confirmation = QMessageBox.warning(
+            self,
+            title,
+            f"{warning}\n\nЗатронутые устройства:\n{names}\n\nПродолжить?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if confirmation != QMessageBox.StandardButton.Yes:
+            return
+        self._bulk_title = title
+        self._bulk_expected = devices
+        self._bulk_results = {}
+        self._update_bulk_actions()
+        for device in devices:
+            credentials = self.device_credentials(device, silent=True)
+
+            def run(target=device, secrets=credentials):
+                return asyncio.run(operation(target, secrets))
+
+            worker = Worker(run)
+            worker.signals.finished.connect(
+                lambda result, i=device.id: self._bulk_finished(i, True, str(result))
+            )
+            worker.signals.failed.connect(
+                lambda error, i=device.id: self._bulk_finished(i, False, error)
+            )
+            self._start_worker(worker)
+
+    def _bulk_finished(self, device_id: int, success: bool, message: str) -> None:
+        names = {device.id: device.name for device in self._bulk_expected}
+        if device_id not in names or device_id in self._bulk_results:
+            return
+        self._bulk_results[device_id] = BulkResult(names[device_id], success, message)
+        if len(self._bulk_results) < len(self._bulk_expected):
+            return
+        report = bulk_report(
+            [self._bulk_results[device.id] for device in self._bulk_expected]
+        )
+        title = self._bulk_title
+        self._bulk_expected = []
+        self._bulk_results = {}
+        self._update_bulk_actions()
+        QMessageBox.information(self, title, report)
 
     def delete_device(self, device: Device) -> None:
         if device.id is None:

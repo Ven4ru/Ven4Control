@@ -21,6 +21,7 @@ DEVICE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("rdp_port", "INTEGER NOT NULL DEFAULT 3389"),
     ("rdp_checked", "INTEGER NOT NULL DEFAULT 0"),
     ("rdp_available", "INTEGER NOT NULL DEFAULT 0"),
+    ("group_name", "TEXT NOT NULL DEFAULT ''"),
 )
 
 
@@ -53,6 +54,7 @@ class DeviceStorage:
                     rdp_port INTEGER NOT NULL DEFAULT 3389,
                     rdp_checked INTEGER NOT NULL DEFAULT 0,
                     rdp_available INTEGER NOT NULL DEFAULT 0,
+                    group_name TEXT NOT NULL DEFAULT '',
                     UNIQUE(host, port, username)
                 )
                 """
@@ -85,15 +87,16 @@ class DeviceStorage:
                         """
                         INSERT INTO devices
                         (name, host, port, username, auth_type, key_path, save_credentials,
-                         fingerprint, log_background, rdp_port, rdp_checked, rdp_available)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         fingerprint, log_background, rdp_port, rdp_checked, rdp_available,
+                         group_name)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             device.name, device.host, device.port, device.username,
                             device.auth_type, device.key_path, int(device.save_credentials),
                             device.fingerprint, int(device.log_background),
                             device.rdp_port, int(device.rdp_checked),
-                            int(device.rdp_available),
+                            int(device.rdp_available), device.group_name,
                         ),
                     )
                     device.id = int(cursor.lastrowid)
@@ -102,7 +105,7 @@ class DeviceStorage:
                         """
                         UPDATE devices SET name=?, host=?, port=?, username=?, auth_type=?,
                         key_path=?, save_credentials=?, fingerprint=?, log_background=?,
-                        rdp_port=?, rdp_checked=?, rdp_available=?
+                        rdp_port=?, rdp_checked=?, rdp_available=?, group_name=?
                         WHERE id=?
                         """,
                         (
@@ -110,7 +113,7 @@ class DeviceStorage:
                             device.auth_type, device.key_path, int(device.save_credentials),
                             device.fingerprint, int(device.log_background),
                             device.rdp_port, int(device.rdp_checked),
-                            int(device.rdp_available), device.id,
+                            int(device.rdp_available), device.group_name, device.id,
                         ),
                     )
                     if cursor.rowcount == 0:
@@ -143,7 +146,8 @@ class DeviceStorage:
         return Device(
             id=row["id"], name=value("name", ""), host=value("host", ""),
             port=int(value("port", 22)),
-            username=value("username", ""), auth_type=value("auth_type", "password"),
+            username=value("username", ""), group_name=value("group_name", ""),
+            auth_type=value("auth_type", "password"),
             key_path=value("key_path", ""),
             save_credentials=bool(value("save_credentials", 0)),
             fingerprint=value("fingerprint", ""),

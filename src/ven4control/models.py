@@ -8,6 +8,9 @@ class Device:
     host: str
     port: int
     username: str
+    # Свободная метка вида «Дом» или «Работа»: только для группировки взглядом
+    # в списке. Поле названо не group, потому что group — ключевое слово SQL.
+    group_name: str = ""
     auth_type: str = "password"
     key_path: str = ""
     save_credentials: bool = False

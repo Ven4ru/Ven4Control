@@ -1,19 +1,30 @@
+from collections.abc import Sequence
+
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
-    QHBoxLayout, QLabel, QLineEdit, QPushButton, QSpinBox, QStackedWidget,
-    QTextEdit, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QCompleter, QDialog, QDialogButtonBox, QFileDialog,
+    QFormLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSpinBox,
+    QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from .models import Device
 
 
 class AddDeviceDialog(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, groups: Sequence[str] = ()):
         super().__init__(parent)
         self.setWindowTitle("Добавить устройство")
         self.resize(560, 420)
 
         self.name = QLineEdit()
+        self.group_name = QLineEdit()
+        self.group_name.setPlaceholderText("Дом, Работа, Друзья — необязательно")
+        if groups:
+            # Подсказка по уже заведённым группам: одна и та же группа,
+            # набранная по-разному, разошлась бы на две строки в списке.
+            completer = QCompleter(list(groups), self)
+            completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+            self.group_name.setCompleter(completer)
         self.host = QLineEdit()
         self.host.setPlaceholderText("IP, имя Tailscale или домен")
         self.port = QSpinBox()
@@ -53,6 +64,7 @@ class AddDeviceDialog(QDialog):
 
         form = QFormLayout()
         form.addRow("Название:", self.name)
+        form.addRow("Группа:", self.group_name)
         form.addRow("Адрес:", self.host)
         form.addRow("SSH-порт:", self.port)
         form.addRow("Пользователь:", self.username)
@@ -90,6 +102,7 @@ class AddDeviceDialog(QDialog):
             host=self.host.text().strip(),
             port=self.port.value(),
             username=self.username.text().strip(),
+            group_name=self.group_name.text().strip(),
             auth_type=str(self.auth_type.currentData()),
             key_path=self.key_path.text().strip(),
             save_credentials=self.save_credentials.isChecked(),

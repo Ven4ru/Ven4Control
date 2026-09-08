@@ -1,11 +1,14 @@
 import unittest
 
 from ven4control.app import (
+    BULK_MESSAGE_LIMIT,
     RDP_DISABLED,
     RDP_ENABLED,
     RDP_UNKNOWN,
     RDP_UNSUPPORTED,
+    BulkResult,
     apply_rdp_result,
+    bulk_report,
     rdp_cell_text,
     rdp_check_label,
     rdp_state,
@@ -177,6 +180,52 @@ class TailscaleImportTests(unittest.TestCase):
         self.assertEqual([], tailscale_candidates({}, set()))
         self.assertEqual([], tailscale_candidates({"Peer": None}, set()))
         self.assertEqual([], tailscale_candidates({"Peer": {"a": "мусор"}}, set()))
+
+
+class BulkReportTests(unittest.TestCase):
+    def test_all_successful_devices_are_listed(self) -> None:
+        report = bulk_report(
+            [
+                BulkResult("Роутер", True, "Команда перезагрузки отправлена."),
+                BulkResult("Домашний ПК", True, "Обновление пакетов завершено."),
+            ]
+        )
+        lines = report.splitlines()
+        self.assertEqual("Операция выполнена на всех устройствах: 2.", lines[0])
+        self.assertIn("✔ Роутер — Команда перезагрузки отправлена.", lines)
+        self.assertIn("✔ Домашний ПК — Обновление пакетов завершено.", lines)
+
+    def test_failed_device_does_not_hide_the_successful_ones(self) -> None:
+        """Отчёт нужен по каждому устройству: ошибка одного не отменяет остальные."""
+        report = bulk_report(
+            [
+                BulkResult("Роутер", True, "Команда перезагрузки отправлена."),
+                BulkResult("Сервер", False, "Соединение не установлено"),
+                BulkResult("Домашний ПК", True, "Готово."),
+            ]
+        )
+        lines = report.splitlines()
+        self.assertEqual("Выполнено: 2 из 3, с ошибкой: 1.", lines[0])
+        self.assertIn("✖ Сервер — Соединение не установлено", lines)
+        self.assertIn("✔ Роутер — Команда перезагрузки отправлена.", lines)
+        self.assertIn("✔ Домашний ПК — Готово.", lines)
+
+    def test_multiline_output_stays_on_one_line(self) -> None:
+        report = bulk_report([BulkResult("Роутер", True, "первая\nвторая   строка\n")])
+        self.assertIn("✔ Роутер — первая вторая строка", report.splitlines())
+
+    def test_long_output_is_trimmed(self) -> None:
+        """Вывод apt-get не должен вытеснять из окна остальные устройства."""
+        report = bulk_report([BulkResult("Сервер", True, "п" * 5000)])
+        line = report.splitlines()[-1]
+        self.assertTrue(line.endswith("…"))
+        self.assertLess(len(line), BULK_MESSAGE_LIMIT + 60)
+
+    def test_empty_answer_is_named(self) -> None:
+        self.assertIn("✔ Роутер — без ответа", bulk_report([BulkResult("Роутер", True, "")]))
+
+    def test_report_without_devices(self) -> None:
+        self.assertEqual("Ни одно устройство не было затронуто.", bulk_report([]))
 
 
 if __name__ == "__main__":
