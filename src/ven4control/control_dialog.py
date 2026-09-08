@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -34,16 +35,19 @@ from ven4control.log_storage import EXPORT_FORMATS
 from ven4control.log_worker import status_label
 from ven4control.models import Device
 from ven4control.remote_control import (
+    PackageResult,
     ServiceInfo,
     SystemOverview,
     backup_configs,
     check_openwrt_upgrade,
     collect_overview,
     install_openwrt_upgrade,
+    install_package,
     list_services,
     read_logs,
     reboot_device,
     restart_service,
+    search_packages,
     update_packages,
 )
 from ven4control.sftp_session import (
@@ -119,6 +123,7 @@ class DeviceControlDialog(QDialog):
             ("Фоновый журнал", self._create_background_tab()),
             ("Файлы", self.files_page),
             ("Обслуживание", self._create_maintenance_tab()),
+            ("Приложения", self._create_apps_tab()),
         ]
         self._nav_buttons: list[QPushButton] = []
         for title_text, page in page_titles:
@@ -596,6 +601,94 @@ class DeviceControlDialog(QDialog):
         self.maintenance_output.setReadOnly(True)
         layout.addWidget(self.maintenance_output, 1)
         return page
+
+    def _create_apps_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+
+        search_row = QHBoxLayout()
+        self.apps_search_field = QLineEdit()
+        self.apps_search_field.setPlaceholderText(
+            "Название или часть описания — например, sftp"
+        )
+        self.apps_search_field.returnPressed.connect(self.search_apps)
+        search_button = QPushButton("Найти")
+        search_button.clicked.connect(self.search_apps)
+        search_row.addWidget(self.apps_search_field, 1)
+        search_row.addWidget(search_button)
+        layout.addLayout(search_row)
+
+        self.apps_table = QTableWidget(0, 2)
+        self.apps_table.setHorizontalHeaderLabels(["Имя", "Описание"])
+        self.apps_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.apps_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self.apps_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        # Имя пакета — то, по чему выбирают строку: колонка подстраивается под
+        # него целиком, обрезанное «openssh-sftp-…» не различает три соседних
+        # пакета. Описание забирает остаток ширины.
+        self.apps_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.apps_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.Stretch
+        )
+        layout.addWidget(self.apps_table, 1)
+
+        self.apps_install_button = QPushButton("Установить выбранный")
+        self.apps_install_button.setEnabled(False)
+        self.apps_install_button.clicked.connect(self.install_selected_app)
+        self.apps_table.itemSelectionChanged.connect(self._update_apps_install_button)
+        layout.addWidget(self.apps_install_button)
+
+        self.apps_output = QTextEdit()
+        self.apps_output.setReadOnly(True)
+        self.apps_output.setMaximumHeight(120)
+        layout.addWidget(self.apps_output)
+
+        self._apps_results: list[PackageResult] = []
+        return page
+
+    def search_apps(self) -> None:
+        term = self.apps_search_field.text().strip()
+        if not term:
+            return
+        self.apps_install_button.setEnabled(False)
+        self._start(
+            lambda: search_packages(self.device, self.credentials, term),
+            self._apps_search_done,
+            f"Поиск «{term}»…",
+        )
+
+    def _apps_search_done(self, result: object) -> None:
+        results = result if isinstance(result, list) else []
+        self._apps_results = results
+        self.apps_table.setRowCount(len(results))
+        for row, item in enumerate(results):
+            self.apps_table.setItem(row, 0, QTableWidgetItem(item.name))
+            self.apps_table.setItem(row, 1, QTableWidgetItem(item.description))
+        self.apps_output.setPlainText(
+            f"Найдено: {len(results)}" if results else "Ничего не найдено."
+        )
+
+    def _update_apps_install_button(self) -> None:
+        self.apps_install_button.setEnabled(
+            bool(self.apps_table.selectionModel().selectedRows())
+        )
+
+    def install_selected_app(self) -> None:
+        rows = self.apps_table.selectionModel().selectedRows()
+        if not rows:
+            return
+        package = self._apps_results[rows[0].row()]
+        self._start(
+            lambda: install_package(self.device, self.credentials, package.name),
+            lambda result: self.apps_output.setPlainText(str(result)),
+            f"Установка «{package.name}»…",
+        )
 
     def _start(
         self,
