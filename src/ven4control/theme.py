@@ -204,10 +204,18 @@ QLabel[secondary="true"] {{
     color: {c['text_secondary']};
 }}
 
-QLabel[eyebrow="true"] {{
+QPushButton#sectionToggle {{
+    background-color: transparent;
+    border: none;
     color: {c['text_secondary']};
     font-size: 9pt;
     font-weight: 600;
+    text-align: left;
+    padding: 4px 0;
+}}
+
+QPushButton#sectionToggle:hover {{
+    color: {c['text_primary']};
 }}
 
 QPushButton {{
