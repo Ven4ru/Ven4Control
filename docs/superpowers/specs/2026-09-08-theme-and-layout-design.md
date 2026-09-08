@@ -42,9 +42,11 @@ Ven4Control, минимально повторяя WPF-механику там, 
 
 Новый модуль `src/ven4control/theme.py`:
 
-- `THEMES = ("web", "teal", "dark", "light")`, `DEFAULT_THEME = "web"`
-  (совпадает с Ven4Tools — тема «как на сайте» несёт фирменный цвет обоих
-  продуктов).
+- `THEMES = ("web", "teal", "dark", "light")`, `DEFAULT_THEME = "teal"`
+  (проверено по коду: `Ven4Tools/Models/UserProfile.cs:11` —
+  `public string Theme { get; set; } = "teal";` — реальный дефолт
+  Ven4Tools, не «web», как можно было бы предположить по фирменному цвету
+  сайта).
 - `_palette_for(theme: str) -> ThemePalette` — dataclass с теми же 13 полями
   и теми же HEX-значениями, что в `PaletteFor` из `ThemeService.cs`
   (переписываются построчно, не пересчитываются заново).
