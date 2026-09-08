@@ -7,18 +7,18 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal, Slot
-from PySide6.QtGui import QAction, QCloseEvent, QIcon
+from PySide6.QtGui import QCloseEvent, QIcon
 from PySide6.QtWidgets import (
-    QApplication, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QMainWindow,
-    QMenu, QMessageBox, QPushButton, QStyle, QSystemTrayIcon, QTableWidget,
-    QTableWidgetItem, QToolBar, QVBoxLayout, QWidget,
+    QApplication, QFrame, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
+    QMainWindow, QMenu, QMessageBox, QPushButton, QStyle, QSystemTrayIcon,
+    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ven4control import autostart, scheduled_task
 from ven4control.ansi_screen import set_default_colors as set_terminal_colors
 from ven4control.control_dialog import DeviceControlDialog
 from ven4control.credentials import CredentialStore
-from ven4control.dialogs import AddDeviceDialog, InstructionsDialog
+from ven4control.dialogs import AddDeviceDialog, InstructionsDialog, SettingsDialog
 from ven4control.log_sessions import preferred_export_format, session_manager
 from ven4control.log_worker import status_label
 from ven4control.models import Device
@@ -113,6 +113,13 @@ def _single_line(message: str) -> str:
     if len(collapsed) > BULK_MESSAGE_LIMIT:
         return collapsed[:BULK_MESSAGE_LIMIT] + "…"
     return collapsed
+
+
+def online_summary(online: int, total: int) -> str:
+    """Текст статус-пилюли сайдбара: сколько устройств сейчас в сети."""
+    if not total:
+        return "Устройств нет"
+    return f"Онлайн: {online} из {total}"
 
 
 def terminal_command(device: Device) -> list[str]:
@@ -286,14 +293,43 @@ class MainWindow(QMainWindow):
         self.table.itemSelectionChanged.connect(self._update_selection)
         self.table.itemChanged.connect(self._table_item_changed)
 
-        action_panel = QWidget()
-        action_panel.setMinimumWidth(190)
-        action_panel.setMaximumWidth(260)
-        action_layout = QVBoxLayout(action_panel)
-        action_layout.addWidget(QLabel("Действия"))
+        sidebar = QWidget()
+        sidebar.setObjectName("sidebar")
+        # 230px обрезал текст длинных кнопок вроде «Обновить пакеты на
+        # выбранных» — 250 вмещает их без сокращения подписей.
+        sidebar.setFixedWidth(250)
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(14, 14, 14, 10)
+        sidebar_layout.setSpacing(6)
+
+        brand_row = QHBoxLayout()
+        brand_strip = QFrame()
+        brand_strip.setObjectName("brandStrip")
+        brand_strip.setFixedSize(3, 36)
+        brand_row.addWidget(brand_strip)
+        brand_title = QLabel("Ven4Control")
+        brand_title.setStyleSheet("font-size: 14pt; font-weight: 700;")
+        brand_row.addWidget(brand_title)
+        brand_row.addStretch()
+        sidebar_layout.addLayout(brand_row)
+        sidebar_layout.addSpacing(10)
+
+        sidebar_layout.addWidget(self._section_label("УСТРОЙСТВА"))
+        add_button = QPushButton("Добавить")
+        add_button.clicked.connect(self.add_device)
+        refresh_button = QPushButton("Обновить")
+        refresh_button.clicked.connect(self.refresh_statuses)
+        tailscale_button = QPushButton("Импорт Tailscale")
+        tailscale_button.clicked.connect(self.import_tailscale)
+        sidebar_layout.addWidget(add_button)
+        sidebar_layout.addWidget(refresh_button)
+        sidebar_layout.addWidget(tailscale_button)
+
+        sidebar_layout.addSpacing(10)
+        sidebar_layout.addWidget(self._section_label("ВЫБРАННОЕ УСТРОЙСТВО"))
         self.selected_label = QLabel("Устройство не выбрано")
         self.selected_label.setWordWrap(True)
-        action_layout.addWidget(self.selected_label)
+        sidebar_layout.addWidget(self.selected_label)
         self.terminal_button = QPushButton("Открыть терминал")
         self.terminal_button.clicked.connect(self.open_selected_terminal)
         self.console_button = QPushButton("Встроенный терминал")
@@ -314,57 +350,88 @@ class MainWindow(QMainWindow):
         self.forget_button.clicked.connect(self.forget_selected_credentials)
         self.delete_button = QPushButton("Удалить устройство")
         self.delete_button.clicked.connect(self.delete_selected_device)
-        action_layout.addWidget(self.control_button)
-        action_layout.addWidget(self.logging_button)
-        action_layout.addWidget(self.console_button)
-        action_layout.addWidget(self.terminal_button)
-        action_layout.addWidget(self.rdp_check_button)
-        action_layout.addWidget(self.rdp_enable_button)
-        action_layout.addWidget(self.rdp_button)
-        action_layout.addWidget(self.group_button)
-        action_layout.addWidget(self.forget_button)
-        action_layout.addWidget(self.delete_button)
+        sidebar_layout.addWidget(self.control_button)
+        sidebar_layout.addWidget(self.logging_button)
+        sidebar_layout.addWidget(self.console_button)
+        sidebar_layout.addWidget(self.terminal_button)
+        sidebar_layout.addWidget(self.rdp_check_button)
+        sidebar_layout.addWidget(self.rdp_enable_button)
+        sidebar_layout.addWidget(self.rdp_button)
+        sidebar_layout.addWidget(self.group_button)
+        sidebar_layout.addWidget(self.forget_button)
+        sidebar_layout.addWidget(self.delete_button)
 
-        action_layout.addSpacing(12)
-        action_layout.addWidget(QLabel("Массовые операции"))
+        sidebar_layout.addSpacing(10)
+        sidebar_layout.addWidget(self._section_label("МАССОВЫЕ ОПЕРАЦИИ"))
         self.bulk_label = QLabel("Ничего не отмечено")
         self.bulk_label.setWordWrap(True)
-        action_layout.addWidget(self.bulk_label)
+        sidebar_layout.addWidget(self.bulk_label)
         self.bulk_reboot_button = QPushButton("Перезагрузить выбранные")
         self.bulk_reboot_button.clicked.connect(self.reboot_checked_devices)
         self.bulk_update_button = QPushButton("Обновить пакеты на выбранных")
         self.bulk_update_button.clicked.connect(self.update_checked_devices)
-        action_layout.addWidget(self.bulk_reboot_button)
-        action_layout.addWidget(self.bulk_update_button)
-        action_layout.addStretch()
+        sidebar_layout.addWidget(self.bulk_reboot_button)
+        sidebar_layout.addWidget(self.bulk_update_button)
 
-        toolbar = QToolBar()
-        self.addToolBar(toolbar)
-        add_action = QAction("Добавить", self)
-        add_action.triggered.connect(self.add_device)
-        refresh_action = QAction("Обновить", self)
-        refresh_action.triggered.connect(self.refresh_statuses)
-        instructions_action = QAction("Установка ключа", self)
-        instructions_action.triggered.connect(self.show_instructions)
-        tailscale_action = QAction("Импорт Tailscale", self)
-        tailscale_action.triggered.connect(self.import_tailscale)
-        toolbar.addAction(add_action)
-        toolbar.addAction(refresh_action)
-        toolbar.addAction(tailscale_action)
-        toolbar.addAction(instructions_action)
+        sidebar_layout.addStretch()
+        self.status_pill = QLabel(online_summary(0, 0))
+        self.status_pill.setProperty("secondary", True)
+        self.status_pill.setWordWrap(True)
+        sidebar_layout.addWidget(self.status_pill)
+        instructions_button = QPushButton("Установка ключа")
+        instructions_button.clicked.connect(self.show_instructions)
+        settings_button = QPushButton("Настройки")
+        settings_button.clicked.connect(self.open_settings)
+        sidebar_layout.addWidget(instructions_button)
+        sidebar_layout.addWidget(settings_button)
 
-        container = QWidget()
-        layout = QVBoxLayout(container)
-        layout.addWidget(QLabel("Ваши устройства"))
-        content_layout = QHBoxLayout()
-        content_layout.addWidget(action_panel)
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+
+        header = QWidget()
+        header.setObjectName("contentHeader")
+        header_layout = QVBoxLayout(header)
+        header_layout.setContentsMargins(18, 12, 18, 12)
+        header_title = QLabel("Устройства")
+        header_title.setStyleSheet("font-size: 13pt; font-weight: 600;")
+        header_layout.addWidget(header_title)
+        header_subtitle = QLabel("Управление вашими SSH-устройствами")
+        header_subtitle.setProperty("secondary", True)
+        header_layout.addWidget(header_subtitle)
+        content_layout.addWidget(header)
         content_layout.addWidget(self.table, 1)
-        layout.addLayout(content_layout)
-        self.setCentralWidget(container)
+
+        root = QWidget()
+        root_layout = QHBoxLayout(root)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+        root_layout.addWidget(sidebar)
+        root_layout.addWidget(content, 1)
+        self.setCentralWidget(root)
         self._create_tray()
         self._update_selection()
         self.reload()
         self.restore_background_sessions()
+
+    def _section_label(self, text: str) -> QLabel:
+        """Заголовок раздела сайдбара: цвет и размер задаёт QSS темы."""
+        label = QLabel(text)
+        label.setProperty("eyebrow", True)
+        return label
+
+    def open_settings(self) -> None:
+        SettingsDialog(load_settings(), self).exec()
+
+    def _update_status_pill(self) -> None:
+        online = sum(
+            1
+            for row in range(self.table.rowCount())
+            if (item := self.table.item(row, COL_STATUS)) is not None
+            and item.text() == "В сети"
+        )
+        self.status_pill.setText(online_summary(online, len(self.devices)))
 
     def _create_tray(self) -> None:
         """Создаёт значок в трее: без него окно закрывалось бы насовсем."""
@@ -597,6 +664,7 @@ class MainWindow(QMainWindow):
             self.table.selectRow(restored)
         self._update_selection()
         self._update_bulk_actions()
+        self._update_status_pill()
         self.refresh_statuses()
 
     def _check_item(self, device: Device) -> QTableWidgetItem:
@@ -790,6 +858,7 @@ class MainWindow(QMainWindow):
         status.setForeground(Qt.GlobalColor.darkGreen if online else Qt.GlobalColor.red)
         self.table.setItem(row, COL_STATUS, status)
         self.table.setItem(row, COL_LATENCY, QTableWidgetItem(detail if online else "—"))
+        self._update_status_pill()
 
     def _start_worker(self, worker: Worker) -> None:
         self.workers.add(worker)
