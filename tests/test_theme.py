@@ -72,6 +72,12 @@ class StylesheetTests(unittest.TestCase):
     def test_stylesheet_is_substantial(self) -> None:
         self.assertGreater(len(stylesheet_for(DEFAULT_THEME)), 500)
 
+    def test_stylesheet_styles_the_sidebar_container(self) -> None:
+        css = stylesheet_for(DEFAULT_THEME)
+        self.assertIn("#sidebar", css)
+        self.assertIn("#contentHeader", css)
+        self.assertIn("#brandStrip", css)
+
 
 class _FakeApp:
     def __init__(self) -> None:

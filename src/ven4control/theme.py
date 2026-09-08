@@ -326,6 +326,21 @@ QScrollBar::handle:vertical:hover {{
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
     height: 0px;
 }}
+
+QWidget#sidebar {{
+    background-color: {c['sidebar_background']};
+    border-right: 1px solid {c['border_color']};
+}}
+
+QWidget#contentHeader {{
+    background-color: {c['sidebar_background']};
+    border-bottom: 1px solid {c['border_color']};
+}}
+
+QFrame#brandStrip {{
+    background-color: {c['accent_color']};
+    border-radius: 1px;
+}}
 """.strip()
 
 
