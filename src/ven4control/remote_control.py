@@ -221,6 +221,34 @@ def parse_apt_search(output: str) -> list[PackageResult]:
     return results
 
 
+def parse_winget_search(output: str) -> list[PackageResult]:
+    """Разбирает вывод `winget search <термин> --accept-source-agreements`.
+
+    winget не даёт структурированный вывод для search (нет флага JSON) —
+    только таблицу, выровненную пробелами. Граница столбца — 2+ пробела
+    подряд; внутри значения столбца пробел встречается не больше одного
+    раза (проверено на реальном выводе: `Bitvise SSH Client`, `Tag: sftp`).
+    В install идёт Id (`Bitvise.SSH.Client`), не Name — тот же принцип,
+    что у apk/opkg/apt: PackageResult.name — точный устанавливаемый
+    идентификатор, Name+Version собираются в description для показа.
+    """
+    lines = [line for line in output.splitlines() if line.strip()]
+    separator_index = next(
+        (i for i, line in enumerate(lines) if set(line.strip()) == {"-"}),
+        None,
+    )
+    if separator_index is None:
+        return []
+    results: list[PackageResult] = []
+    for line in lines[separator_index + 1:]:
+        fields = re.split(r"\s{2,}", line.strip())
+        if len(fields) < 3:
+            continue
+        name, package_id, version = fields[0], fields[1], fields[2]
+        results.append(PackageResult(package_id, f"{name} · {version}"))
+    return results
+
+
 @dataclass(slots=True)
 class RdpStatus:
     """Ответ на вопрос «можно ли подключиться к устройству по RDP».

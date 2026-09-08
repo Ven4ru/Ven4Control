@@ -24,6 +24,7 @@ from ven4control.remote_control import (
     parse_opkg_search,
     parse_rdp_state,
     parse_systemd_services,
+    parse_winget_search,
     search_packages,
 )
 
@@ -470,6 +471,30 @@ class AptSearchParsingTests(unittest.TestCase):
 
     def test_no_matches_is_an_empty_list(self) -> None:
         self.assertEqual([], parse_apt_search(""))
+
+
+class WingetSearchParsingTests(unittest.TestCase):
+    """Строки — реальный вывод `winget search sftp --accept-source-agreements`
+    с VenchWork (Windows 11, winget v1.29.290), не выдуманы."""
+
+    def test_real_output_from_a_live_windows_machine(self) -> None:
+        output = (
+            "Name                   Id                              Version       Match            Source\n"
+            "---------------------------------------------------------------------------------------------\n"
+            "Avash                  AdrienCros.Avash                0.10.1        Tag: sftp        winget\n"
+            "Bitvise SSH Client     Bitvise.SSH.Client              9.66          Tag: sftp        winget\n"
+        )
+        results = parse_winget_search(output)
+        # В установку идёт Id, не Name — тот же принцип, что у apk/opkg/apt:
+        # PackageResult.name — точный устанавливаемый идентификатор.
+        self.assertEqual(["AdrienCros.Avash", "Bitvise.SSH.Client"], [r.name for r in results])
+        self.assertEqual("Avash · 0.10.1", results[0].description)
+
+    def test_no_separator_line_is_an_empty_list(self) -> None:
+        self.assertEqual([], parse_winget_search("No package found matching input criteria.\n"))
+
+    def test_empty_output_is_an_empty_list(self) -> None:
+        self.assertEqual([], parse_winget_search(""))
 
 
 class SearchPackagesTests(unittest.TestCase):
