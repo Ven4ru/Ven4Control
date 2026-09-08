@@ -18,12 +18,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from ven4control.ansi_screen import (
-    DEFAULT_BACKGROUND,
-    DEFAULT_FOREGROUND,
-    TerminalScreen,
-    terminal_size,
-)
+from ven4control import ansi_screen
+from ven4control.ansi_screen import TerminalScreen, terminal_size
 from ven4control.models import Device
 from ven4control.terminal_session import (
     STATUS_ACTIVE,
@@ -133,10 +129,12 @@ class TerminalView(QTextEdit):
         font.setPointSize(10)
         self.setFont(font)
         self.document().setDefaultFont(font)
+        # Через атрибут модуля, а не from-импортом: цвета переопределяются при
+        # старте под активную тему, а from-импорт сохранил бы старое значение.
         self.setStyleSheet(
             "QTextEdit {"
-            f"background-color: {DEFAULT_BACKGROUND};"
-            f"color: {DEFAULT_FOREGROUND};"
+            f"background-color: {ansi_screen.DEFAULT_BACKGROUND};"
+            f"color: {ansi_screen.DEFAULT_FOREGROUND};"
             "border: none;"
             "}"
         )

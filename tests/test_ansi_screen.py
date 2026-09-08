@@ -1,5 +1,6 @@
 import unittest
 
+from ven4control import ansi_screen
 from ven4control.ansi_screen import (
     DEFAULT_COLUMNS,
     DEFAULT_ROWS,
@@ -14,6 +15,7 @@ from ven4control.ansi_screen import (
     color_256,
     normalize_size,
     render_line,
+    set_default_colors,
     style_to_css,
     terminal_size,
 )
@@ -238,6 +240,28 @@ class ScreenTests(unittest.TestCase):
         screen = self.screen(columns=10, rows=10)
         screen.feed("строка")
         self.assertNotIn("<br>", screen.render_screen())
+
+
+class DefaultColorOverrideTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        # Возвращаем модуль в исходное состояние для остальных тестов файла.
+        set_default_colors("#101014", "#d8d8d8")
+
+    def test_set_default_colors_changes_the_module_values(self) -> None:
+        set_default_colors("#123456", "#abcdef")
+        # Через атрибут модуля, а не через from-импорт: тот скопировал бы
+        # значение на момент импорта и переопределения бы не увидел.
+        self.assertEqual("#123456", ansi_screen.DEFAULT_BACKGROUND)
+        self.assertEqual("#abcdef", ansi_screen.DEFAULT_FOREGROUND)
+
+    def test_inverse_sgr_uses_the_overridden_colors(self) -> None:
+        set_default_colors("#123456", "#abcdef")
+        style = apply_sgr(DEFAULT_STYLE, [7])  # SGR 7 — инверсия
+        css = style_to_css(style)
+        # Инверсия без явного цвета берёт DEFAULT_BACKGROUND/FOREGROUND —
+        # именно то место, которое должно увидеть переопределение.
+        self.assertIn("color:#123456", css.replace(" ", ""))
+        self.assertIn("background-color:#abcdef", css.replace(" ", ""))
 
 
 if __name__ == "__main__":
