@@ -43,6 +43,7 @@ from ven4control.remote_control import (
     collect_overview,
     install_openwrt_upgrade,
     install_package,
+    install_ven4tools,
     list_services,
     read_logs,
     reboot_device,
@@ -649,6 +650,10 @@ class DeviceControlDialog(QDialog):
         self.apps_output.setMaximumHeight(120)
         layout.addWidget(self.apps_output)
 
+        ven4tools_button = QPushButton("Установить/обновить Ven4Tools")
+        ven4tools_button.clicked.connect(self.install_ven4tools_on_device)
+        layout.addWidget(ven4tools_button)
+
         self._apps_results: list[PackageResult] = []
         return page
 
@@ -688,6 +693,13 @@ class DeviceControlDialog(QDialog):
             lambda: install_package(self.device, self.credentials, package.name),
             lambda result: self.apps_output.setPlainText(str(result)),
             f"Установка «{package.name}»…",
+        )
+
+    def install_ven4tools_on_device(self) -> None:
+        self._start(
+            lambda: install_ven4tools(self.device, self.credentials),
+            lambda result: self.apps_output.setPlainText(str(result)),
+            "Установка Ven4Tools…",
         )
 
     def _start(
