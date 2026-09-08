@@ -9,6 +9,7 @@ from pathlib import Path
 import asyncssh
 
 from .models import Device
+from .windows_identity import current_user_principal
 
 
 def tcp_check(host: str, port: int, timeout: float = 2.5) -> tuple[bool, str]:
@@ -54,11 +55,9 @@ def secure_private_key_permissions(private_path: Path) -> None:
     if os.name != "nt":
         private_path.chmod(0o600)
         return
-    username = os.environ.get("USERNAME")
-    domain = os.environ.get("USERDOMAIN")
-    if not username:
+    if not os.environ.get("USERNAME"):
         raise RuntimeError("Не удалось определить текущего пользователя Windows")
-    principal = f"{domain}\\{username}" if domain else username
+    principal = current_user_principal()
     result = _apply_windows_private_key_acl(private_path, principal)
     if result.returncode == 0:
         return
