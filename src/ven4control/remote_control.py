@@ -226,11 +226,18 @@ def parse_winget_search(output: str) -> list[PackageResult]:
     """Разбирает вывод `winget search <термин> --accept-source-agreements`.
 
     winget не даёт структурированный вывод для search (нет флага JSON) —
-    только таблицу, выровненную пробелами. Граница столбца — 2+ пробела
-    подряд; внутри значения столбца пробел встречается не больше одного
-    раза (проверено на реальном выводе: `Bitvise SSH Client`, `Tag: sftp`).
-    В install идёт Id (`Bitvise.SSH.Client`), не Name — тот же принцип,
-    что у apk/opkg/apt: PackageResult.name — точный устанавливаемый
+    только таблицу с колонками ФИКСИРОВАННОЙ ширины (не просто выровненную
+    пробелами): позиции начала столбцов берутся из строки заголовка и
+    одинаковы для всех строк таблицы. Разбор по «2+ пробела подряд» ломается
+    на реальных данных: длинный Id может упираться в границу столбца Version
+    всего одним пробелом (живой пример — `Orange-OpenSource.Hurl 8.0.1`,
+    оба поля склеиваются в одно) — тогда в install ушёл бы `--id` с лишним
+    текстом версии, и winget не нашёл бы такой пакет. Нарезка по позициям
+    заголовка не подвержена этой проблеме — граница столбца не зависит от
+    того, сколько пробелов оказалось у конкретной строки.
+
+    В install идёт Id (`Bitvise.SSH.Client`), не Name — тот же принцип, что
+    у apk/opkg/apt: PackageResult.name — точный устанавливаемый
     идентификатор, Name+Version собираются в description для показа.
     """
     lines = [line for line in output.splitlines() if line.strip()]
@@ -238,14 +245,22 @@ def parse_winget_search(output: str) -> list[PackageResult]:
         (i for i, line in enumerate(lines) if set(line.strip()) == {"-"}),
         None,
     )
-    if separator_index is None:
+    if separator_index is None or separator_index == 0:
+        return []
+    header = lines[separator_index - 1]
+    try:
+        id_start = header.index("Id")
+        version_start = header.index("Version")
+        match_start = header.index("Match")
+    except ValueError:
         return []
     results: list[PackageResult] = []
     for line in lines[separator_index + 1:]:
-        fields = re.split(r"\s{2,}", line.strip())
-        if len(fields) < 3:
+        name = line[:id_start].strip()
+        package_id = line[id_start:version_start].strip()
+        version = line[version_start:match_start].strip()
+        if not package_id:
             continue
-        name, package_id, version = fields[0], fields[1], fields[2]
         results.append(PackageResult(package_id, f"{name} · {version}"))
     return results
 

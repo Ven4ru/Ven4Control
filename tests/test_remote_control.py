@@ -497,6 +497,22 @@ class WingetSearchParsingTests(unittest.TestCase):
     def test_empty_output_is_an_empty_list(self) -> None:
         self.assertEqual([], parse_winget_search(""))
 
+    def test_long_id_touching_the_version_column_is_not_merged(self) -> None:
+        # Живая находка на VenchWork: `winget search curl` — Id
+        # "Orange-OpenSource.Hurl" ровно упирается в границу столбца Version,
+        # между ними всего ОДИН пробел (не 2+). Разбор по количеству пробелов
+        # склеил бы Id и Version в одно поле ("Orange-OpenSource.Hurl 8.0.1")
+        # — с таким --id winget не нашёл бы пакет при установке.
+        output = (
+            "Name       Id                     Version      Match     Source\n"
+            "----------------------------------------------------------------\n"
+            "cURL       cURL.cURL              8.21.0.6               winget\n"
+            "Hurl       Orange-OpenSource.Hurl 8.0.1        Tag: curl winget\n"
+        )
+        results = parse_winget_search(output)
+        self.assertEqual(["cURL.cURL", "Orange-OpenSource.Hurl"], [r.name for r in results])
+        self.assertEqual("Hurl · 8.0.1", results[1].description)
+
 
 class SearchPackagesTests(unittest.TestCase):
     def test_apk_device_returns_parsed_results(self) -> None:
