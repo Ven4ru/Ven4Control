@@ -2,12 +2,13 @@ import asyncio
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal, Slot
+from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QHeaderView,
@@ -44,6 +45,13 @@ from ven4control.remote_control import (
     reboot_device,
     restart_service,
     update_packages,
+)
+from ven4control.sftp_session import (
+    RemoteEntry,
+    SftpSession,
+    child_path,
+    parent_path,
+    sftp_status_label,
 )
 
 
@@ -100,7 +108,13 @@ class DeviceControlDialog(QDialog):
         self.tabs.addTab(self._create_services_tab(), "Сервисы")
         self.tabs.addTab(self._create_logs_tab(), "Логи")
         self.tabs.addTab(self._create_background_tab(), "Фоновый журнал")
+        self.files_page = self._create_files_tab()
+        self.tabs.addTab(self.files_page, "Файлы")
         self.tabs.addTab(self._create_maintenance_tab(), "Обслуживание")
+        # SFTP-соединение открывается только когда его действительно
+        # попросили: за обзором и логами пользователь на вкладку файлов
+        # может не зайти ни разу.
+        self.tabs.currentChanged.connect(self._tab_changed)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(self.reject)
@@ -321,6 +335,196 @@ class DeviceControlDialog(QDialog):
         else:
             self.background_status.setText("Состояние: сессия не запущена")
 
+    def _create_files_tab(self) -> QWidget:
+        """Вкладка файлов: листинг папок устройства и передача одного файла."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+
+        self.files_path = QLabel("—")
+        self.files_path.setWordWrap(True)
+        # Имена и пути приходят с устройства: как разметку их читать нельзя.
+        self.files_path.setTextFormat(Qt.TextFormat.PlainText)
+        layout.addWidget(self.files_path)
+
+        controls = QHBoxLayout()
+        self.files_up_button = QPushButton("Наверх")
+        self.files_up_button.clicked.connect(self.open_parent_directory)
+        self.files_refresh_button = QPushButton("Обновить")
+        self.files_refresh_button.clicked.connect(self.refresh_files)
+        self.files_download_button = QPushButton("Скачать выбранный")
+        self.files_download_button.clicked.connect(self.download_selected_file)
+        self.files_upload_button = QPushButton("Загрузить файл")
+        self.files_upload_button.clicked.connect(self.upload_file)
+        controls.addWidget(self.files_up_button)
+        controls.addWidget(self.files_refresh_button)
+        controls.addStretch()
+        controls.addWidget(self.files_download_button)
+        controls.addWidget(self.files_upload_button)
+        layout.addLayout(controls)
+
+        self.files_table = QTableWidget(0, 4)
+        self.files_table.setHorizontalHeaderLabels(["Имя", "Тип", "Размер", "Права"])
+        self.files_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.files_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self.files_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.files_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch
+        )
+        self.files_table.doubleClicked.connect(lambda _index: self.open_selected_entry())
+        layout.addWidget(self.files_table, 1)
+
+        self.files_status = QLabel("Соединение откроется при переходе на вкладку.")
+        self.files_status.setWordWrap(True)
+        self.files_status.setTextFormat(Qt.TextFormat.PlainText)
+        layout.addWidget(self.files_status)
+
+        self.files_entries: list[RemoteEntry] = []
+        self.files_started = False
+        self.files_busy = False
+        self.files = SftpSession(self.device, self.credentials)
+        self.files.listing_received.connect(self._show_listing)
+        self.files.status_changed.connect(self._files_status_changed)
+        self.files.operation_failed.connect(self._files_failed)
+        self.files.progress_changed.connect(self.files_status.setText)
+        self.files.transfer_finished.connect(self._files_transfer_finished)
+        self._update_files_controls()
+        return page
+
+    def _tab_changed(self, index: int) -> None:
+        if self.tabs.widget(index) is self.files_page:
+            self._start_files_session()
+
+    def _start_files_session(self) -> None:
+        if self.files_started:
+            return
+        self.files_started = True
+        try:
+            self.files.start()
+        except Exception as error:
+            self.files_status.setText(str(error))
+            QMessageBox.warning(self, "Файлы недоступны", str(error))
+            return
+        self.files_status.setText("Подключение к устройству…")
+        self.files.list_directory()
+
+    def refresh_files(self) -> None:
+        if self.files.list_directory():
+            self.files_status.setText("Чтение папки…")
+
+    def open_parent_directory(self) -> None:
+        target = parent_path(self.files.path)
+        if target == self.files.path:
+            self.files_status.setText("Это корневая папка устройства.")
+            return
+        if self.files.list_directory(target):
+            self.files_status.setText("Чтение папки…")
+
+    def open_selected_entry(self) -> None:
+        entry = self._selected_entry()
+        if entry is None:
+            return
+        if not entry.can_enter:
+            self.files_status.setText(
+                f"«{entry.name}» — это файл. Используйте «Скачать выбранный»."
+            )
+            return
+        if self.files.list_directory(child_path(self.files.path, entry.name)):
+            self.files_status.setText("Чтение папки…")
+
+    def download_selected_file(self) -> None:
+        entry = self._selected_entry()
+        if entry is None:
+            QMessageBox.information(self, "Файлы", "Выберите файл в списке.")
+            return
+        if entry.is_directory:
+            QMessageBox.information(
+                self, "Файлы", "Скачивание папок целиком не поддерживается."
+            )
+            return
+        target, _filter = QFileDialog.getSaveFileName(
+            self, "Сохранить файл", str(Path.home() / entry.name)
+        )
+        if not target:
+            return
+        if not self.files.download(entry.name, target):
+            self.files_status.setText("Соединение закрыто, скачивание не начато.")
+            return
+        self.files_busy = True
+        self._update_files_controls()
+
+    def upload_file(self) -> None:
+        if not self.files.ready:
+            QMessageBox.information(
+                self, "Файлы", "Соединение с устройством ещё не открыто."
+            )
+            return
+        source, _filter = QFileDialog.getOpenFileName(
+            self, "Выберите файл для загрузки", str(Path.home())
+        )
+        if not source:
+            return
+        if not self.files.upload(source):
+            self.files_status.setText("Соединение закрыто, загрузка не начата.")
+            return
+        self.files_busy = True
+        self._update_files_controls()
+
+    def _selected_entry(self) -> RemoteEntry | None:
+        row = self.files_table.currentRow()
+        if 0 <= row < len(self.files_entries):
+            return self.files_entries[row]
+        return None
+
+    def _show_listing(self, path: str, entries: object) -> None:
+        items = list(entries) if isinstance(entries, list) else []
+        self.files_entries = items
+        self.files_path.setText(f"Папка: {path}")
+        self.files_table.setRowCount(len(items))
+        for row, entry in enumerate(items):
+            self.files_table.setItem(row, 0, QTableWidgetItem(entry.name))
+            self.files_table.setItem(row, 1, QTableWidgetItem(entry.kind_label))
+            self.files_table.setItem(row, 2, QTableWidgetItem(entry.size_label))
+            self.files_table.setItem(row, 3, QTableWidgetItem(entry.permissions_label))
+        self.files_status.setText(
+            f"Объектов: {len(items)}" if items else "Папка пуста"
+        )
+        self._update_files_controls()
+
+    def _files_status_changed(self, status: str) -> None:
+        self.files_status.setText(f"Состояние: {sftp_status_label(status)}")
+        self._update_files_controls()
+
+    def _files_failed(self, message: str) -> None:
+        was_busy = self.files_busy
+        self.files_busy = False
+        self.files_status.setText(message)
+        self._update_files_controls()
+        # Отказ листинга виден в строке состояния, а прерванная передача —
+        # это уже потерянная работа пользователя, о ней говорим отдельно.
+        if was_busy:
+            QMessageBox.warning(self, "Передача не выполнена", message)
+
+    def _files_transfer_finished(self, message: str) -> None:
+        self.files_busy = False
+        self.files_status.setText(message)
+        self._update_files_controls()
+        QMessageBox.information(self, "Передача завершена", message)
+
+    def _update_files_controls(self) -> None:
+        available = self.files.ready and not self.files_busy
+        for button in (
+            self.files_up_button,
+            self.files_refresh_button,
+            self.files_download_button,
+            self.files_upload_button,
+        ):
+            button.setEnabled(available)
+        self.files_table.setEnabled(not self.files_busy)
+
     def _create_maintenance_tab(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -533,6 +737,13 @@ class DeviceControlDialog(QDialog):
                 "Дождитесь завершения текущей операции.",
             )
             return
+        if self.files_busy:
+            QMessageBox.information(
+                self,
+                "Передача выполняется",
+                "Дождитесь завершения передачи файла.",
+            )
+            return
         self._disconnect_sessions()
         super().reject()
 
@@ -541,9 +752,18 @@ class DeviceControlDialog(QDialog):
         for signal, slot in (
             (self.sessions.status_changed, self._background_status_changed),
             (self.sessions.line_received, self._background_line),
+            (self.files.listing_received, self._show_listing),
+            (self.files.status_changed, self._files_status_changed),
+            (self.files.operation_failed, self._files_failed),
+            (self.files.progress_changed, self.files_status.setText),
+            (self.files.transfer_finished, self._files_transfer_finished),
         ):
             try:
                 signal.disconnect(slot)
             except (RuntimeError, TypeError):
                 # Подписки уже нет: диалог закрывают повторно.
                 pass
+        # SFTP-соединение принадлежит окну и не должно его пережить;
+        # отписка идёт первой, чтобы ответы уже закрытой сессии не пришли
+        # в уничтоженные виджеты.
+        self.files.shutdown()
