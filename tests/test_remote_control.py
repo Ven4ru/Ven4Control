@@ -589,6 +589,33 @@ class InstallVen4ToolsTests(unittest.TestCase):
         executed = connection.commands[-1]
         self.assertIn("SilentlyContinue", executed)
 
+    def test_dropped_channel_after_real_success_is_confirmed_by_verification(self) -> None:
+        # Живая находка на VenchWork: основная команда рвётся с
+        # exit_status=None и пустым выводом уже ПОСЛЕ того, как установка
+        # на устройстве реально завершилась. "Expand-Archive" — маркер
+        # основной команды, "Get-Content" — отдельной команды проверки.
+        connection = windows_connection(
+            ("Expand-Archive", "", None),
+            ("Get-Content", "v5.1.2", 0),
+        )
+        with patched_connect(connection):
+            result = asyncio.run(install_ven4tools(device(), {}))
+        self.assertIn("v5.1.2", result)
+        self.assertIn("подтверждено проверкой", result)
+
+    def test_dropped_channel_without_matching_marker_raises(self) -> None:
+        # Проверка не подтвердила совпадение версии (маркер не совпал или
+        # отсутствует) — исходная ошибка должна дойти до вызывающего кода,
+        # не выдаваться молча за успех.
+        connection = windows_connection(
+            ("Expand-Archive", "", None),
+            ("Get-Content", "", 0),
+        )
+        with patched_connect(connection):
+            with self.assertRaises(RuntimeError) as raised:
+                asyncio.run(install_ven4tools(device(), {}))
+        self.assertIn("кодом None", str(raised.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

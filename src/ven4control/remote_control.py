@@ -813,6 +813,7 @@ async def install_package(
 # полностью перезаписывает её содержимое, не класть туда ничего своего.
 VEN4TOOLS_INSTALL_PATH = "C:\\Ven4Tools"
 VEN4TOOLS_REPO = "Ven4ru/Ven4Tools"
+VEN4TOOLS_VERSION_MARKER = f"{VEN4TOOLS_INSTALL_PATH}\\.ven4tools-version"
 
 
 async def install_ven4tools(device: Device, credentials: dict[str, str]) -> str:
@@ -822,6 +823,17 @@ async def install_ven4tools(device: Device, credentials: dict[str, str]) -> str:
     -Force перезаписывает совпадающие файлы. $ProgressPreference обязателен
     (без него Invoke-WebRequest зависает на неинтерактивной SSH-сессии на
     некоторых машинах).
+
+    Живая находка на VenchWork: при долгом скачивании SSH-канал клиента
+    может оборваться уже ПОСЛЕ того, как установка на устройстве реально
+    завершилась — `_run` в этом случае получает `exit_status=None` и
+    пустой вывод (не `TimeoutError`, соединение не зависает, оно рвётся
+    именно в момент завершения передачи) и репортует это как обычную
+    ошибку. Чтобы не выдавать реальный успех за сбой, при любой ошибке
+    основной команды делаем короткую отдельную проверку через
+    `_verify_ven4tools_install` — если она подтверждает свежую установку,
+    возвращаем успех; если сама проверка тоже не отвечает — не гадать,
+    дать исходной ошибке распространиться как есть.
     """
     connection = await _connect(device, credentials)
     try:
@@ -842,10 +854,63 @@ async def install_ven4tools(device: Device, credentials: dict[str, str]) -> str:
             "Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath; "
             f"Expand-Archive -Path $zipPath -DestinationPath {ps_quote(VEN4TOOLS_INSTALL_PATH)} -Force; "
             "Remove-Item $zipPath -Force; "
+            f"Set-Content -Path {ps_quote(VEN4TOOLS_VERSION_MARKER)} -Value $release.tag_name -NoNewline; "
             f'Write-Output "Ven4Tools $($release.tag_name) установлен в {VEN4TOOLS_INSTALL_PATH}"'
         )
-        result = await _run(connection, command, timeout=600, check=True)
-        return result.stdout.strip()
+        try:
+            result = await _run(connection, command, timeout=600, check=True)
+            return result.stdout.strip()
+        except RuntimeError as error:
+            # Живая находка на VenchWork: после того как канал рвётся во
+            # время долгой передачи, само SSH-соединение (не только этот
+            # канал) оказывается непригодно для новых команд — повторное
+            # использование того же `connection` для проверки надёжно не
+            # срабатывает. Проверка открывает СВОЁ отдельное соединение.
+            verified = await _verify_ven4tools_install(device, credentials)
+            if verified is not None:
+                return verified
+            raise error
+    finally:
+        connection.close()
+        await connection.wait_closed()
+
+
+async def _verify_ven4tools_install(
+    device: Device, credentials: dict[str, str]
+) -> str | None:
+    """Короткая проверка после сбоя основной команды `install_ven4tools`.
+
+    Запрашивает у GitHub актуальный тег ещё раз и сравнивает его с
+    маркером версии, который основная команда пишет ПОСЛЕДНИМ шагом
+    (после `Expand-Archive`) — если совпадает, установка на устройстве
+    реально завершена, даже если исходная команда не успела вернуть
+    ответ. Открывает НОВОЕ соединение (не переиспользует то, что только
+    что оборвалось) — сама проверка не отвечает — возвращает None (не
+    гадать).
+    """
+    try:
+        connection = await _connect(device, credentials)
+    except Exception:
+        return None
+    try:
+        command = (
+            "$release = Invoke-RestMethod -Uri "
+            f'"https://api.github.com/repos/{VEN4TOOLS_REPO}/releases/latest"; '
+            f"$marker = Get-Content -Path {ps_quote(VEN4TOOLS_VERSION_MARKER)} -ErrorAction SilentlyContinue; "
+            "if ($marker -eq $release.tag_name) { Write-Output $release.tag_name } "
+            "else { Write-Output '' }"
+        )
+        try:
+            result = await _run(connection, command, timeout=30, check=False)
+        except Exception:
+            return None
+        tag = result.stdout.strip()
+        if not tag:
+            return None
+        return (
+            f"Ven4Tools {tag} уже установлен в {VEN4TOOLS_INSTALL_PATH} "
+            "(подтверждено проверкой после обрыва соединения)."
+        )
     finally:
         connection.close()
         await connection.wait_closed()
