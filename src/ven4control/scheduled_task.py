@@ -17,6 +17,7 @@ import tempfile
 from pathlib import Path
 
 from ven4control import autostart
+from ven4control.powershell import quote as _quoted
 from ven4control.windows_identity import current_user_principal
 
 
@@ -62,11 +63,6 @@ def current_user() -> str:
     сопоставления имени с SID». См. `windows_identity.current_user_principal`.
     """
     return current_user_principal()
-
-
-def _quoted(value: str) -> str:
-    """Строка PowerShell в одинарных кавычках: внутри удваивается только '."""
-    return "'" + value.replace("'", "''") + "'"
 
 
 def split_command(command: str) -> tuple[str, str]:

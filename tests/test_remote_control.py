@@ -17,6 +17,7 @@ from ven4control.remote_control import (
     detect_platform,
     enable_rdp,
     install_package,
+    install_ven4tools,
     is_rdp_enabled,
     parse_apk_search,
     parse_apt_search,
@@ -24,6 +25,7 @@ from ven4control.remote_control import (
     parse_opkg_search,
     parse_rdp_state,
     parse_systemd_services,
+    parse_winget_search,
     search_packages,
 )
 
@@ -472,6 +474,46 @@ class AptSearchParsingTests(unittest.TestCase):
         self.assertEqual([], parse_apt_search(""))
 
 
+class WingetSearchParsingTests(unittest.TestCase):
+    """Строки — реальный вывод `winget search sftp --accept-source-agreements`
+    с VenchWork (Windows 11, winget v1.29.290), не выдуманы."""
+
+    def test_real_output_from_a_live_windows_machine(self) -> None:
+        output = (
+            "Name                   Id                              Version       Match            Source\n"
+            "---------------------------------------------------------------------------------------------\n"
+            "Avash                  AdrienCros.Avash                0.10.1        Tag: sftp        winget\n"
+            "Bitvise SSH Client     Bitvise.SSH.Client              9.66          Tag: sftp        winget\n"
+        )
+        results = parse_winget_search(output)
+        # В установку идёт Id, не Name — тот же принцип, что у apk/opkg/apt:
+        # PackageResult.name — точный устанавливаемый идентификатор.
+        self.assertEqual(["AdrienCros.Avash", "Bitvise.SSH.Client"], [r.name for r in results])
+        self.assertEqual("Avash · 0.10.1", results[0].description)
+
+    def test_no_separator_line_is_an_empty_list(self) -> None:
+        self.assertEqual([], parse_winget_search("No package found matching input criteria.\n"))
+
+    def test_empty_output_is_an_empty_list(self) -> None:
+        self.assertEqual([], parse_winget_search(""))
+
+    def test_long_id_touching_the_version_column_is_not_merged(self) -> None:
+        # Живая находка на VenchWork: `winget search curl` — Id
+        # "Orange-OpenSource.Hurl" ровно упирается в границу столбца Version,
+        # между ними всего ОДИН пробел (не 2+). Разбор по количеству пробелов
+        # склеил бы Id и Version в одно поле ("Orange-OpenSource.Hurl 8.0.1")
+        # — с таким --id winget не нашёл бы пакет при установке.
+        output = (
+            "Name       Id                     Version      Match     Source\n"
+            "----------------------------------------------------------------\n"
+            "cURL       cURL.cURL              8.21.0.6               winget\n"
+            "Hurl       Orange-OpenSource.Hurl 8.0.1        Tag: curl winget\n"
+        )
+        results = parse_winget_search(output)
+        self.assertEqual(["cURL.cURL", "Orange-OpenSource.Hurl"], [r.name for r in results])
+        self.assertEqual("Hurl · 8.0.1", results[1].description)
+
+
 class SearchPackagesTests(unittest.TestCase):
     def test_apk_device_returns_parsed_results(self) -> None:
         # Маркер "apk search" — подстрока реальной команды, которую строит
@@ -506,6 +548,46 @@ class InstallPackageTests(unittest.TestCase):
         executed = connection.commands[-1]
         self.assertIn("apk add 'pkg`whoami`'", executed)
         self.assertNotIn("apk add pkg`whoami`", executed)
+
+
+class SearchPackagesWindowsTests(unittest.TestCase):
+    def test_windows_device_uses_winget(self) -> None:
+        connection = windows_connection(("winget search", (
+            "Name    Id            Version  Match       Source\n"
+            "----------------------------------------------\n"
+            "Avash   Vendor.Avash  1.0      Tag: sftp   winget\n"
+        ), 0))
+        with patched_connect(connection):
+            results = asyncio.run(search_packages(device(), {}, "sftp"))
+        self.assertEqual("Vendor.Avash", results[0].name)
+
+    def test_search_term_is_powershell_escaped(self) -> None:
+        connection = windows_connection(("winget search", "", 0))
+        with patched_connect(connection):
+            asyncio.run(search_packages(device(), {}, "sftp'; Remove-Item C:\\"))
+        executed = connection.commands[-1]
+        # PowerShell-экранирование: одинарная кавычка внутри строки
+        # удваивается, не убегает обратным слэшем (POSIX-приём здесь неверен).
+        self.assertIn("'sftp''; Remove-Item C:\\'", executed)
+
+
+class InstallVen4ToolsTests(unittest.TestCase):
+    def test_non_windows_device_is_rejected(self) -> None:
+        connection = openwrt_connection()
+        with patched_connect(connection):
+            with self.assertRaises(RuntimeError) as raised:
+                asyncio.run(install_ven4tools(device(), {}))
+        self.assertIn("только на Windows", str(raised.exception))
+
+    def test_windows_device_runs_the_download_command(self) -> None:
+        connection = windows_connection(
+            ("Invoke-RestMethod", "Ven4Tools v5.1.1 установлен в C:\\Ven4Tools", 0)
+        )
+        with patched_connect(connection):
+            result = asyncio.run(install_ven4tools(device(), {}))
+        self.assertIn("установлен", result)
+        executed = connection.commands[-1]
+        self.assertIn("SilentlyContinue", executed)
 
 
 if __name__ == "__main__":
