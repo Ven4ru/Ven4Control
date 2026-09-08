@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
+from ven4control.ansi_screen import set_default_colors as set_terminal_colors
 from ven4control.settings import AppSettings, save_settings
 from ven4control.theme import THEME_LABELS, THEMES, apply_theme, build_palette
 
@@ -186,4 +187,9 @@ class SettingsDialog(QDialog):
         app = QApplication.instance()
         if app is not None:
             apply_theme(app, theme)
+        # Без этого терминал, открытый после смены темы в этом же запуске,
+        # оставался бы в цветах старой темы до перезапуска приложения —
+        # main() выставляет эти цвета только один раз, при старте.
+        palette = build_palette(theme)
+        set_terminal_colors(palette["content_background"], palette["text_primary"])
         save_settings(AppSettings(theme=theme))
