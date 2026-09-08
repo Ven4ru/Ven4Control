@@ -8,7 +8,12 @@ from PySide6.QtWidgets import (
 )
 
 from ven4control.ansi_screen import set_default_colors as set_terminal_colors
-from ven4control.settings import AppSettings, save_settings
+from ven4control.settings import (
+    TERMINAL_THEME_SYNC,
+    AppSettings,
+    save_settings,
+    terminal_palette,
+)
 from ven4control.theme import THEME_LABELS, THEMES, apply_theme, build_palette
 
 from .models import Device
@@ -147,32 +152,53 @@ Add-Content "$HOME\\.ssh\\authorized_keys" "{encoded}"
 
 
 class SettingsDialog(QDialog):
-    """Выбор темы интерфейса. Выбор применяется и сохраняется сразу же."""
+    """Выбор темы интерфейса и (независимо) темы терминала.
 
-    def __init__(self, current_theme: str, parent=None):
+    Тема терминала по умолчанию — «Как в приложении»: следует за темой
+    интерфейса, как в фазе 1. Выбор конкретной темы для терминала
+    отвязывает его от темы приложения — дальнейшая смена темы интерфейса
+    терминал больше не трогает, пока не выбрать «Как в приложении» снова.
+    """
+
+    def __init__(self, settings: AppSettings, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Настройки")
-        self.resize(360, 320)
-        self.selected_theme = current_theme
+        self.resize(380, 480)
+        self.selected_theme = settings.theme
+        self.selected_terminal_theme = settings.terminal_theme
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("Тема интерфейса"))
-
-        self._buttons: dict[str, QPushButton] = {}
+        self._app_buttons: dict[str, QPushButton] = {}
         for theme in THEMES:
-            accent = build_palette(theme)["accent_color"]
-            button = QPushButton(THEME_LABELS[theme])
-            button.setCheckable(True)
-            button.setChecked(theme == current_theme)
-            # Полоса акцентного цвета слева — тот же приём, что у логотипа
-            # в Ven4Tools: сама кнопка показывает, какой это акцент, а не
-            # только название темы текстом.
-            button.setStyleSheet(
-                f"QPushButton {{ border-left: 4px solid {accent}; "
-                "text-align: left; padding: 10px; }"
+            button = self._theme_button(
+                THEME_LABELS[theme],
+                build_palette(theme)["accent_color"],
+                theme == self.selected_theme,
             )
-            button.clicked.connect(lambda _checked, t=theme: self._select(t))
-            self._buttons[theme] = button
+            button.clicked.connect(lambda _checked, t=theme: self._select_app_theme(t))
+            self._app_buttons[theme] = button
+            layout.addWidget(button)
+
+        layout.addSpacing(12)
+        layout.addWidget(QLabel("Тема терминала"))
+        self._terminal_buttons: dict[str, QPushButton] = {}
+        sync_button = self._theme_button(
+            "Как в приложении", None, self.selected_terminal_theme == TERMINAL_THEME_SYNC
+        )
+        sync_button.clicked.connect(
+            lambda _checked: self._select_terminal_theme(TERMINAL_THEME_SYNC)
+        )
+        self._terminal_buttons[TERMINAL_THEME_SYNC] = sync_button
+        layout.addWidget(sync_button)
+        for theme in THEMES:
+            button = self._theme_button(
+                THEME_LABELS[theme],
+                build_palette(theme)["accent_color"],
+                theme == self.selected_terminal_theme,
+            )
+            button.clicked.connect(lambda _checked, t=theme: self._select_terminal_theme(t))
+            self._terminal_buttons[theme] = button
             layout.addWidget(button)
 
         layout.addStretch()
@@ -180,16 +206,50 @@ class SettingsDialog(QDialog):
         buttons_box.rejected.connect(self.reject)
         layout.addWidget(buttons_box)
 
-    def _select(self, theme: str) -> None:
+    @staticmethod
+    def _theme_button(label: str, accent: str | None, checked: bool) -> QPushButton:
+        # Полоса акцентного цвета слева — тот же приём, что у логотипа в
+        # Ven4Tools: кнопка сама показывает акцент, а не только название
+        # текстом. У «Как в приложении» акцента нет — полоса прозрачная,
+        # а не какого-то одного цвета темы, который был бы неверным намёком.
+        button = QPushButton(label)
+        button.setCheckable(True)
+        button.setChecked(checked)
+        border = f"4px solid {accent}" if accent else "4px solid transparent"
+        button.setStyleSheet(
+            f"QPushButton {{ border-left: {border}; text-align: left; padding: 10px; }}"
+        )
+        return button
+
+    def _select_app_theme(self, theme: str) -> None:
         self.selected_theme = theme
-        for name, button in self._buttons.items():
+        for name, button in self._app_buttons.items():
             button.setChecked(name == theme)
         app = QApplication.instance()
         if app is not None:
             apply_theme(app, theme)
+        # Синхронизированный терминал следует за темой приложения; терминал
+        # с явно выбранной темой этой сменой не затрагивается.
+        self._apply_terminal_colors()
+        self._save()
+
+    def _select_terminal_theme(self, theme: str) -> None:
+        self.selected_terminal_theme = theme
+        for name, button in self._terminal_buttons.items():
+            button.setChecked(name == theme)
+        self._apply_terminal_colors()
+        self._save()
+
+    def _apply_terminal_colors(self) -> None:
         # Без этого терминал, открытый после смены темы в этом же запуске,
-        # оставался бы в цветах старой темы до перезапуска приложения —
-        # main() выставляет эти цвета только один раз, при старте.
-        palette = build_palette(theme)
+        # оставался бы в старых цветах до перезапуска приложения — main()
+        # выставляет их только один раз, при старте.
+        palette = terminal_palette(
+            AppSettings(theme=self.selected_theme, terminal_theme=self.selected_terminal_theme)
+        )
         set_terminal_colors(palette["content_background"], palette["text_primary"])
-        save_settings(AppSettings(theme=theme))
+
+    def _save(self) -> None:
+        save_settings(
+            AppSettings(theme=self.selected_theme, terminal_theme=self.selected_terminal_theme)
+        )

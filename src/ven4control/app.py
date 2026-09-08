@@ -36,7 +36,7 @@ from ven4control.remote_control import (
     reboot_device,
     update_packages,
 )
-from ven4control.settings import load_settings
+from ven4control.settings import load_settings, terminal_palette
 from ven4control.single_instance import SingleInstanceGuard
 from ven4control.ssh_service import (
     ensure_app_key,
@@ -46,7 +46,7 @@ from ven4control.ssh_service import (
 )
 from ven4control.storage import DeviceStorage
 from ven4control.terminal_dialog import TerminalDialog
-from ven4control.theme import apply_theme, build_palette
+from ven4control.theme import apply_theme
 
 
 def resource_path(name: str) -> Path:
@@ -1396,7 +1396,7 @@ def main() -> int:
     app.setApplicationName("Ven4Control")
     settings = load_settings()
     apply_theme(app, settings.theme)
-    palette = build_palette(settings.theme)
+    palette = terminal_palette(settings)
     set_terminal_colors(palette["content_background"], palette["text_primary"])
     guard = SingleInstanceGuard()
     if not guard.try_acquire():
