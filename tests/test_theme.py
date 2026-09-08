@@ -83,6 +83,11 @@ class StylesheetTests(unittest.TestCase):
         self.assertIn("#sectionToggle", css)
         self.assertNotIn("eyebrow", css)
 
+    def test_stylesheet_styles_dialog_nav_buttons(self) -> None:
+        css = stylesheet_for(DEFAULT_THEME)
+        self.assertIn('[nav="true"]', css)
+        self.assertIn('[navActive="true"]', css)
+
 
 class _FakeApp:
     def __init__(self) -> None:
