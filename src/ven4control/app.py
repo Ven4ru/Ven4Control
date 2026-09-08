@@ -295,7 +295,9 @@ class MainWindow(QMainWindow):
 
         sidebar = QWidget()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(230)
+        # 230px обрезал текст длинных кнопок вроде «Обновить пакеты на
+        # выбранных» — 250 вмещает их без сокращения подписей.
+        sidebar.setFixedWidth(250)
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(14, 14, 14, 10)
         sidebar_layout.setSpacing(6)
