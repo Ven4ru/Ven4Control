@@ -115,6 +115,13 @@ def _single_line(message: str) -> str:
     return collapsed
 
 
+def online_summary(online: int, total: int) -> str:
+    """Текст статус-пилюли сайдбара: сколько устройств сейчас в сети."""
+    if not total:
+        return "Устройств нет"
+    return f"Онлайн: {online} из {total}"
+
+
 def terminal_command(device: Device) -> list[str]:
     """Аргументы ssh для запуска терминала к устройству."""
     args = ["ssh", "-p", str(device.port)]

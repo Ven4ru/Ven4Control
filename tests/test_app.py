@@ -9,6 +9,7 @@ from ven4control.app import (
     BulkResult,
     apply_rdp_result,
     bulk_report,
+    online_summary,
     rdp_cell_text,
     rdp_check_label,
     rdp_state,
@@ -226,6 +227,21 @@ class BulkReportTests(unittest.TestCase):
 
     def test_report_without_devices(self) -> None:
         self.assertEqual("Ни одно устройство не было затронуто.", bulk_report([]))
+
+
+class OnlineSummaryTests(unittest.TestCase):
+    def test_no_devices_at_all(self) -> None:
+        self.assertEqual("Устройств нет", online_summary(0, 0))
+
+    def test_all_online(self) -> None:
+        self.assertEqual("Онлайн: 3 из 3", online_summary(3, 3))
+
+    def test_some_offline(self) -> None:
+        self.assertEqual("Онлайн: 1 из 3", online_summary(1, 3))
+
+    def test_none_online_yet(self) -> None:
+        # Проверки ещё не пришли (или все офлайн) — 0 из total, не «нет устройств».
+        self.assertEqual("Онлайн: 0 из 3", online_summary(0, 3))
 
 
 if __name__ == "__main__":
