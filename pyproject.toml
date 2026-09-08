@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ven4control"
-version = "0.4.0"
+version = "0.4.1"
 description = "Контролируй, логируй и управляй своими OpenWrt-роутерами, Ubuntu-серверами и Windows-машинами из одного окна"
 requires-python = ">=3.12"
 dependencies = [
