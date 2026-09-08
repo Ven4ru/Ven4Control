@@ -687,6 +687,76 @@ async def update_packages(
         await connection.wait_closed()
 
 
+async def search_packages(
+    device: Device,
+    credentials: dict[str, str],
+    term: str,
+) -> list[PackageResult]:
+    """Ищет пакет в уже настроенных на устройстве репозиториях."""
+    connection = await _connect(device, credentials)
+    try:
+        platform, _ = await detect_platform(connection)
+        safe_term = shlex.quote(term)
+        if platform == "openwrt":
+            command = (
+                "if command -v apk >/dev/null 2>&1; then "
+                "apk update >/dev/null 2>&1; "
+                f"apk search -v -d {safe_term} 2>/dev/null; "
+                "elif command -v opkg >/dev/null 2>&1; then "
+                "opkg update >/dev/null 2>&1; "
+                f"opkg list 2>/dev/null | grep -i {safe_term}; "
+                "else echo 'Менеджер пакетов не найден' >&2; exit 127; fi"
+            )
+            parser = parse_apk_search
+        else:
+            command = (
+                "sudo -n apt-get update >/dev/null 2>&1; "
+                f"apt-cache search {safe_term}"
+            )
+            parser = parse_apt_search
+        result = await _run(connection, command, timeout=30, check=False)
+        # Ненулевой код при пустом выводе — настоящий сбой; ненулевой код при
+        # непустом выводе даёт grep opkg-ветки, когда совпадений нет, и это
+        # не ошибка.
+        if result.exit_status not in (0, None) and not result.stdout.strip():
+            detail = (result.stderr or "").strip()
+            raise RuntimeError(detail or "Поиск не выполнен.")
+        return parser(result.stdout)
+    finally:
+        connection.close()
+        await connection.wait_closed()
+
+
+async def install_package(
+    device: Device,
+    credentials: dict[str, str],
+    name: str,
+) -> str:
+    """Устанавливает пакет по имени, полученному из результатов поиска."""
+    connection = await _connect(device, credentials)
+    try:
+        platform, _ = await detect_platform(connection)
+        safe_name = shlex.quote(name)
+        if platform == "openwrt":
+            command = (
+                "if command -v apk >/dev/null 2>&1; then "
+                f"apk add {safe_name}; "
+                "elif command -v opkg >/dev/null 2>&1; then "
+                f"opkg install {safe_name}; "
+                "else echo 'Менеджер пакетов не найден' >&2; exit 127; fi"
+            )
+        else:
+            command = (
+                "sudo -n env DEBIAN_FRONTEND=noninteractive "
+                f"apt-get install -y {safe_name}"
+            )
+        result = await _run(connection, command, timeout=300, check=True)
+        return result.stdout.strip() or f"Пакет «{name}» установлен."
+    finally:
+        connection.close()
+        await connection.wait_closed()
+
+
 async def check_openwrt_upgrade(
     device: Device,
     credentials: dict[str, str],

@@ -16,6 +16,7 @@ from ven4control.remote_control import (
     collect_overview,
     detect_platform,
     enable_rdp,
+    install_package,
     is_rdp_enabled,
     parse_apk_search,
     parse_apt_search,
@@ -23,6 +24,7 @@ from ven4control.remote_control import (
     parse_opkg_search,
     parse_rdp_state,
     parse_systemd_services,
+    search_packages,
 )
 
 
@@ -468,6 +470,42 @@ class AptSearchParsingTests(unittest.TestCase):
 
     def test_no_matches_is_an_empty_list(self) -> None:
         self.assertEqual([], parse_apt_search(""))
+
+
+class SearchPackagesTests(unittest.TestCase):
+    def test_apk_device_returns_parsed_results(self) -> None:
+        # Маркер "apk search" — подстрока реальной команды, которую строит
+        # search_packages для платформы openwrt: FakeConnection подставляет
+        # ответ по вхождению маркера в отправленную строку.
+        connection = openwrt_connection(
+            ("apk search", "openssh-sftp-server-10.3_p1-r1 - OpenSSH SFTP server.\n", 0)
+        )
+        with patched_connect(connection):
+            results = asyncio.run(search_packages(device(), {}, "sftp"))
+        self.assertEqual("openssh-sftp-server", results[0].name)
+        self.assertTrue(connection.closed)
+
+    def test_search_term_is_shell_escaped(self) -> None:
+        """Защита от command injection: термин уходит одним словом в кавычках."""
+        connection = openwrt_connection(("apk search", "", 0))
+        with patched_connect(connection):
+            asyncio.run(search_packages(device(), {}, "sftp; rm -rf /"))
+        executed = connection.commands[-1]
+        self.assertIn("apk search -v -d 'sftp; rm -rf /'", executed)
+        self.assertNotIn("apk search -v -d sftp;", executed)
+        self.assertNotIn("grep -i sftp;", executed)
+
+
+class InstallPackageTests(unittest.TestCase):
+    def test_package_name_is_shell_escaped(self) -> None:
+        # install_package использует _run(..., check=True) — ответ обязан быть
+        # с кодом 0, иначе _run поднимет RuntimeError раньше проверки.
+        connection = openwrt_connection(("apk add", "OK", 0))
+        with patched_connect(connection):
+            asyncio.run(install_package(device(), {}, "pkg`whoami`"))
+        executed = connection.commands[-1]
+        self.assertIn("apk add 'pkg`whoami`'", executed)
+        self.assertNotIn("apk add pkg`whoami`", executed)
 
 
 if __name__ == "__main__":
