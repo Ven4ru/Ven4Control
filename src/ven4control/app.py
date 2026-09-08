@@ -35,6 +35,7 @@ from ven4control.ssh_service import (
     tcp_check,
 )
 from ven4control.storage import DeviceStorage
+from ven4control.terminal_dialog import TerminalDialog
 
 
 def resource_path(name: str) -> Path:
@@ -213,6 +214,8 @@ class MainWindow(QMainWindow):
         action_layout.addWidget(self.selected_label)
         self.terminal_button = QPushButton("Открыть терминал")
         self.terminal_button.clicked.connect(self.open_selected_terminal)
+        self.console_button = QPushButton("Встроенный терминал")
+        self.console_button.clicked.connect(self.open_selected_console)
         self.control_button = QPushButton("Управление устройством")
         self.control_button.clicked.connect(self.control_selected_device)
         self.logging_button = QPushButton("Логировать в фоне")
@@ -229,6 +232,7 @@ class MainWindow(QMainWindow):
         self.delete_button.clicked.connect(self.delete_selected_device)
         action_layout.addWidget(self.control_button)
         action_layout.addWidget(self.logging_button)
+        action_layout.addWidget(self.console_button)
         action_layout.addWidget(self.terminal_button)
         action_layout.addWidget(self.rdp_check_button)
         action_layout.addWidget(self.rdp_enable_button)
@@ -638,6 +642,12 @@ class MainWindow(QMainWindow):
                 self, "Терминал не запущен", f"Не удалось запустить ssh: {error}"
             )
 
+    def open_console(self, device: Device) -> None:
+        """Открывает встроенный терминал: PTY внутри приложения, без ssh.exe."""
+        if not self._require_fingerprint(device, "Встроенный терминал недоступен"):
+            return
+        TerminalDialog(device, self.device_credentials(device), self).exec()
+
     def open_rdp(self, device: Device) -> None:
         """Открывает RDP внутри SSH-туннеля.
 
@@ -676,6 +686,7 @@ class MainWindow(QMainWindow):
             if device else "Устройство не выбрано"
         )
         self.terminal_button.setEnabled(enabled)
+        self.console_button.setEnabled(enabled)
         self.control_button.setEnabled(enabled)
         self.forget_button.setEnabled(enabled)
         self.delete_button.setEnabled(enabled)
@@ -710,6 +721,11 @@ class MainWindow(QMainWindow):
         if device:
             self.open_terminal(device)
 
+    def open_selected_console(self) -> None:
+        device = self.selected_device()
+        if device:
+            self.open_console(device)
+
     def open_selected_rdp(self) -> None:
         device = self.selected_device()
         if device:
@@ -742,7 +758,7 @@ class MainWindow(QMainWindow):
         self._start_worker(worker)
 
     def _require_fingerprint(self, device: Device, title: str) -> bool:
-        """RDP идёт по тому же доверенному каналу: без fingerprint нельзя."""
+        """Терминал и RDP идут по тому же доверенному каналу: без fingerprint нельзя."""
         if device.fingerprint:
             return True
         QMessageBox.warning(
