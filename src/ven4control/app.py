@@ -122,6 +122,12 @@ def online_summary(online: int, total: int) -> str:
     return f"Онлайн: {online} из {total}"
 
 
+def section_header_text(title: str, expanded: bool) -> str:
+    """Текст заголовка-переключателя раздела сайдбара: стрелка + название."""
+    arrow = "▾" if expanded else "▸"
+    return f"{arrow} {title}"
+
+
 def terminal_command(device: Device) -> list[str]:
     """Аргументы ssh для запуска терминала к устройству."""
     args = ["ssh", "-p", str(device.port)]
