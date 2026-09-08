@@ -252,6 +252,77 @@ class StorageTests(unittest.TestCase):
             self.assertEqual("C:/k", device.key_path)
             self.assertEqual("SHA256:x", device.fingerprint)
 
+    def test_group_survives_save_and_rewrite(self):
+        """Группа должна сохраняться и переживать перезапись устройства."""
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "devices.db"
+            storage = DeviceStorage(path)
+            device = storage.save(
+                Device(None, "Роутер", "192.168.99.1", 22, "root", group_name="Дом")
+            )
+            self.assertEqual("Дом", DeviceStorage(path).list_devices()[0].group_name)
+
+            device.group_name = "Друзья"
+            storage.save(device)
+            self.assertEqual("Друзья", DeviceStorage(path).list_devices()[0].group_name)
+
+            # Пустая группа — это «без группы», а не пропуск записи.
+            device.group_name = ""
+            storage.save(device)
+            self.assertEqual("", DeviceStorage(path).list_devices()[0].group_name)
+
+    def test_legacy_database_without_group_is_migrated(self):
+        """База предыдущей версии открывается: группа добавляется пустой."""
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "devices.db"
+            with closing(sqlite3.connect(path)) as db:
+                db.execute(
+                    """
+                    CREATE TABLE devices (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT NOT NULL,
+                        host TEXT NOT NULL,
+                        port INTEGER NOT NULL DEFAULT 22,
+                        username TEXT NOT NULL,
+                        auth_type TEXT NOT NULL DEFAULT 'password',
+                        key_path TEXT NOT NULL DEFAULT '',
+                        save_credentials INTEGER NOT NULL DEFAULT 0,
+                        fingerprint TEXT NOT NULL DEFAULT '',
+                        log_background INTEGER NOT NULL DEFAULT 0,
+                        rdp_port INTEGER NOT NULL DEFAULT 3389,
+                        rdp_checked INTEGER NOT NULL DEFAULT 0,
+                        rdp_available INTEGER NOT NULL DEFAULT 0,
+                        UNIQUE(host, port, username)
+                    )
+                    """
+                )
+                db.execute(
+                    "INSERT INTO devices (name, host, port, username, auth_type,"
+                    " key_path, save_credentials, fingerprint, log_background,"
+                    " rdp_port, rdp_checked, rdp_available)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        "Роутер", "192.168.99.1", 22, "root", "key",
+                        "C:/keys/id_ed25519", 1, "SHA256:router", 1, 3389, 1, 0,
+                    ),
+                )
+                db.commit()
+
+            storage = DeviceStorage(path)
+            device = storage.list_devices()[0]
+            self.assertEqual("Роутер", device.name)
+            self.assertEqual("", device.group_name)
+            self.assertEqual("SHA256:router", device.fingerprint)
+            self.assertTrue(device.log_background)
+            self.assertTrue(device.rdp_checked)
+
+            # Старая запись остаётся обновляемой после добавления столбца.
+            device.group_name = "Дом"
+            storage.save(device)
+            reopened = DeviceStorage(path).list_devices()[0]
+            self.assertEqual("Дом", reopened.group_name)
+            self.assertEqual("SHA256:router", reopened.fingerprint)
+
     def test_background_logging_flag_survives_reopen(self):
         """Отметка фонового логирования должна переживать перезапуск."""
         with tempfile.TemporaryDirectory() as temporary:
