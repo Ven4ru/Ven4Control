@@ -8,6 +8,7 @@ from pathlib import Path
 import asyncssh
 
 from ven4control.models import Device
+from ven4control.powershell import quote as ps_quote
 
 
 SERVICE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.@-]+$")
@@ -725,7 +726,10 @@ async def search_packages(
     try:
         platform, _ = await detect_platform(connection)
         safe_term = shlex.quote(term)
-        if platform == "openwrt":
+        if platform == "windows":
+            command = f"winget search {ps_quote(term)} --accept-source-agreements"
+            parser = parse_winget_search
+        elif platform == "openwrt":
             command = (
                 "if command -v apk >/dev/null 2>&1; then "
                 "apk update >/dev/null 2>&1; "
@@ -765,7 +769,12 @@ async def install_package(
     try:
         platform, _ = await detect_platform(connection)
         safe_name = shlex.quote(name)
-        if platform == "openwrt":
+        if platform == "windows":
+            command = (
+                f"winget install --id {ps_quote(name)} --exact --silent "
+                "--accept-package-agreements --accept-source-agreements"
+            )
+        elif platform == "openwrt":
             command = (
                 "if command -v apk >/dev/null 2>&1; then "
                 f"apk add {safe_name}; "
@@ -780,6 +789,48 @@ async def install_package(
             )
         result = await _run(connection, command, timeout=300, check=True)
         return result.stdout.strip() or f"Пакет «{name}» установлен."
+    finally:
+        connection.close()
+        await connection.wait_closed()
+
+
+# Владелец этой папки на устройстве — кнопка «Ven4Tools»: обновление
+# полностью перезаписывает её содержимое, не класть туда ничего своего.
+VEN4TOOLS_INSTALL_PATH = "C:\\Ven4Tools"
+VEN4TOOLS_REPO = "Ven4ru/Ven4Tools"
+
+
+async def install_ven4tools(device: Device, credentials: dict[str, str]) -> str:
+    """Скачивает последний релиз Ven4Tools с GitHub и распаковывает на устройство.
+
+    Тот же путь и для первой установки, и для обновления — Expand-Archive
+    -Force перезаписывает совпадающие файлы. $ProgressPreference обязателен
+    (без него Invoke-WebRequest зависает на неинтерактивной SSH-сессии на
+    некоторых машинах).
+    """
+    connection = await _connect(device, credentials)
+    try:
+        platform, description = await detect_platform(connection)
+        if platform != "windows":
+            raise RuntimeError(
+                f"Ven4Tools ставится только на Windows, устройство "
+                f"определено как {description} ({platform})."
+            )
+        command = (
+            '$ProgressPreference = "SilentlyContinue"; '
+            "$release = Invoke-RestMethod -Uri "
+            f'"https://api.github.com/repos/{VEN4TOOLS_REPO}/releases/latest"; '
+            '$asset = $release.assets | Where-Object { $_.name -like "*.zip" } '
+            "| Select-Object -First 1; "
+            "if (-not $asset) { throw 'В последнем релизе Ven4Tools нет ZIP-архива.' }; "
+            '$zipPath = "$env:TEMP\\ven4tools-update.zip"; '
+            "Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath; "
+            f"Expand-Archive -Path $zipPath -DestinationPath {ps_quote(VEN4TOOLS_INSTALL_PATH)} -Force; "
+            "Remove-Item $zipPath -Force; "
+            f'Write-Output "Ven4Tools $($release.tag_name) установлен в {VEN4TOOLS_INSTALL_PATH}"'
+        )
+        result = await _run(connection, command, timeout=600, check=True)
+        return result.stdout.strip()
     finally:
         connection.close()
         await connection.wait_closed()

@@ -17,6 +17,7 @@ from ven4control.remote_control import (
     detect_platform,
     enable_rdp,
     install_package,
+    install_ven4tools,
     is_rdp_enabled,
     parse_apk_search,
     parse_apt_search,
@@ -531,6 +532,46 @@ class InstallPackageTests(unittest.TestCase):
         executed = connection.commands[-1]
         self.assertIn("apk add 'pkg`whoami`'", executed)
         self.assertNotIn("apk add pkg`whoami`", executed)
+
+
+class SearchPackagesWindowsTests(unittest.TestCase):
+    def test_windows_device_uses_winget(self) -> None:
+        connection = windows_connection(("winget search", (
+            "Name    Id            Version  Match       Source\n"
+            "----------------------------------------------\n"
+            "Avash   Vendor.Avash  1.0      Tag: sftp   winget\n"
+        ), 0))
+        with patched_connect(connection):
+            results = asyncio.run(search_packages(device(), {}, "sftp"))
+        self.assertEqual("Vendor.Avash", results[0].name)
+
+    def test_search_term_is_powershell_escaped(self) -> None:
+        connection = windows_connection(("winget search", "", 0))
+        with patched_connect(connection):
+            asyncio.run(search_packages(device(), {}, "sftp'; Remove-Item C:\\"))
+        executed = connection.commands[-1]
+        # PowerShell-экранирование: одинарная кавычка внутри строки
+        # удваивается, не убегает обратным слэшем (POSIX-приём здесь неверен).
+        self.assertIn("'sftp''; Remove-Item C:\\'", executed)
+
+
+class InstallVen4ToolsTests(unittest.TestCase):
+    def test_non_windows_device_is_rejected(self) -> None:
+        connection = openwrt_connection()
+        with patched_connect(connection):
+            with self.assertRaises(RuntimeError) as raised:
+                asyncio.run(install_ven4tools(device(), {}))
+        self.assertIn("только на Windows", str(raised.exception))
+
+    def test_windows_device_runs_the_download_command(self) -> None:
+        connection = windows_connection(
+            ("Invoke-RestMethod", "Ven4Tools v5.1.1 установлен в C:\\Ven4Tools", 0)
+        )
+        with patched_connect(connection):
+            result = asyncio.run(install_ven4tools(device(), {}))
+        self.assertIn("установлен", result)
+        executed = connection.commands[-1]
+        self.assertIn("SilentlyContinue", executed)
 
 
 if __name__ == "__main__":
