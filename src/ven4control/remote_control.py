@@ -389,6 +389,41 @@ async def _connect(
         ) from error
 
 
+# Фразы, которыми sudo отвечает, когда пользователю нужен пароль, а `-n`
+# запрещает его спрашивать. Проверяются только вместе со словом `sudo`:
+# подменить чужую ошибку хуже, чем пропустить редкую формулировку.
+SUDO_REFUSAL_PHRASES = (
+    "a password is required",
+    "no tty present",
+    "a terminal is required",
+    "askpass",
+)
+
+SUDO_REFUSAL_MESSAGE = (
+    "Для этой операции нужен пользователь root или sudo без пароля "
+    "(NOPASSWD в sudoers). Подробнее — в README, раздел «Требования»."
+)
+
+
+def is_sudo_refusal(detail: str) -> bool:
+    """Похож ли текст ошибки на отказ sudo из-за требуемого пароля."""
+    lowered = detail.lower()
+    if "sudo" not in lowered:
+        return False
+    return any(phrase in lowered for phrase in SUDO_REFUSAL_PHRASES)
+
+
+def explain_command_error(detail: str) -> str:
+    """Заменяет отказ sudo понятным объяснением, прочие ошибки — как есть.
+
+    Для не-sudo ошибок сырой вывод команды остаётся единственным источником
+    причины, поэтому он не переписывается и не сокращается.
+    """
+    if is_sudo_refusal(detail):
+        return SUDO_REFUSAL_MESSAGE
+    return detail
+
+
 async def _run(
     connection: asyncssh.SSHClientConnection,
     command: str,
@@ -403,7 +438,7 @@ async def _run(
             f"Устройство не ответило за {timeout} с, команда прервана."
         ) from error
     if check and result.exit_status != 0:
-        detail = (result.stderr or result.stdout).strip()
+        detail = explain_command_error((result.stderr or result.stdout).strip())
         raise RuntimeError(detail or f"Команда завершилась с кодом {result.exit_status}")
     return result
 
@@ -910,17 +945,19 @@ async def install_package(
                 "--accept-package-agreements --accept-source-agreements"
             )
         elif platform == "openwrt":
+            # `--` закрывает список опций: shlex.quote не мешает имени пакета
+            # выглядеть как флаг, а имена приходят с самого устройства.
             command = (
                 "if command -v apk >/dev/null 2>&1; then "
-                f"apk add {safe_name}; "
+                f"apk add -- {safe_name}; "
                 "elif command -v opkg >/dev/null 2>&1; then "
-                f"opkg install {safe_name}; "
+                f"opkg install -- {safe_name}; "
                 "else echo 'Менеджер пакетов не найден' >&2; exit 127; fi"
             )
         else:
             command = (
                 "sudo -n env DEBIAN_FRONTEND=noninteractive "
-                f"apt-get install -y {safe_name}"
+                f"apt-get install -y -- {safe_name}"
             )
         result = await _run(connection, command, timeout=300, check=True)
         return result.stdout.strip() or f"Пакет «{name}» установлен."

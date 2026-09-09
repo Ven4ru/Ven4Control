@@ -6,7 +6,7 @@ from pathlib import Path
 
 from ven4control.models import Device
 from ven4control.ssh_service import ensure_app_key
-from ven4control.storage import DeviceStorage
+from ven4control.storage import DeviceStorage, StorageError
 
 
 class StorageTests(unittest.TestCase):
@@ -357,6 +357,25 @@ class StorageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             storage = DeviceStorage(Path(temporary) / "devices.db")
             self.assertFalse(storage.delete(404))
+
+    def test_corrupted_database_names_the_file_and_the_way_out(self):
+        """Битый файл базы обязан объяснить, что делать, и назвать себя."""
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "devices.db"
+            path.write_text("мусор" * 100, encoding="utf-8")
+            with self.assertRaises(StorageError) as context:
+                DeviceStorage(path)
+            message = str(context.exception)
+            self.assertIn(str(path), message)
+            self.assertIn("повреждена", message)
+            self.assertNotIn("file is not a database", message)
+
+    def test_healthy_database_opens_without_error(self):
+        """Регрессия: обычная база по-прежнему открывается."""
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "devices.db"
+            DeviceStorage(path).save(Device(None, "Роутер", "192.168.1.1", 22, "root"))
+            self.assertEqual(1, len(DeviceStorage(path).list_devices()))
 
 
 if __name__ == "__main__":
