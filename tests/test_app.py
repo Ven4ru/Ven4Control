@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QMessageBox
 
 from ven4control.app import (
     BULK_MESSAGE_LIMIT,
+    EMPTY_LIST_HINT,
     RDP_DISABLED,
     RDP_ENABLED,
     RDP_UNKNOWN,
@@ -17,6 +18,7 @@ from ven4control.app import (
     MainWindow,
     apply_rdp_result,
     bulk_report,
+    empty_hint_visible,
     needs_key_install,
     online_summary,
     rdp_cell_text,
@@ -618,6 +620,38 @@ class OnlineSummaryTests(unittest.TestCase):
     def test_none_online_yet(self) -> None:
         # Проверки ещё не пришли (или все офлайн) — 0 из total, не «нет устройств».
         self.assertEqual("Онлайн: 0 из 3", online_summary(0, 3))
+
+
+class EmptyHintTests(unittest.TestCase):
+    """Подсказка про кнопку «Добавить» видна ровно при пустом списке."""
+
+    def test_hint_is_visible_without_devices(self) -> None:
+        self.assertTrue(empty_hint_visible(0))
+
+    def test_hint_is_hidden_with_devices(self) -> None:
+        self.assertFalse(empty_hint_visible(1))
+        self.assertFalse(empty_hint_visible(7))
+
+    def test_hint_text_names_the_button(self) -> None:
+        self.assertIn("Добавить", EMPTY_LIST_HINT)
+
+    def test_window_shows_the_label_when_the_list_is_empty(self) -> None:
+        window = MainWindow.__new__(MainWindow)
+        window.empty_hint = SimpleNamespace(
+            visible=None, setVisible=lambda value: setattr(window.empty_hint, "visible", value)
+        )
+        window.devices = []
+        MainWindow._update_empty_hint(window)
+        self.assertTrue(window.empty_hint.visible)
+
+    def test_window_hides_the_label_once_a_device_appears(self) -> None:
+        window = MainWindow.__new__(MainWindow)
+        window.empty_hint = SimpleNamespace(
+            visible=None, setVisible=lambda value: setattr(window.empty_hint, "visible", value)
+        )
+        window.devices = [Device(1, "Роутер", "192.168.1.1", 22, "root")]
+        MainWindow._update_empty_hint(window)
+        self.assertFalse(window.empty_hint.visible)
 
 
 class SectionHeaderTextTests(unittest.TestCase):

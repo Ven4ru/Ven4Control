@@ -117,6 +117,20 @@ def _single_line(message: str) -> str:
     return collapsed
 
 
+# Пустая таблица при первом запуске ничего не подсказывала: статус-пилюля
+# говорит «Устройств нет», но не говорит, что делать дальше.
+EMPTY_LIST_HINT = (
+    "Устройств пока нет.\n\n"
+    "Нажмите «Добавить» в панели слева, чтобы завести первое устройство, "
+    "или «Импорт Tailscale», если они уже есть в вашем tailnet."
+)
+
+
+def empty_hint_visible(total: int) -> bool:
+    """Показывать ли подсказку о пустом списке устройств."""
+    return total == 0
+
+
 def online_summary(online: int, total: int) -> str:
     """Текст статус-пилюли сайдбара: сколько устройств сейчас в сети."""
     if not total:
@@ -527,6 +541,15 @@ class MainWindow(QMainWindow):
         header_subtitle.setProperty("secondary", True)
         header_layout.addWidget(header_subtitle)
         content_layout.addWidget(header)
+        # Подсказка первого запуска: живёт над таблицей и скрывается, как
+        # только в списке появляется хотя бы одно устройство.
+        self.empty_hint = QLabel(EMPTY_LIST_HINT)
+        self.empty_hint.setObjectName("emptyHint")
+        self.empty_hint.setProperty("secondary", True)
+        self.empty_hint.setWordWrap(True)
+        self.empty_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_hint.setContentsMargins(24, 24, 24, 24)
+        content_layout.addWidget(self.empty_hint)
         content_layout.addWidget(self.table, 1)
 
         root = QWidget()
@@ -552,6 +575,10 @@ class MainWindow(QMainWindow):
             and item.text() == "В сети"
         )
         self.status_pill.setText(online_summary(online, len(self.devices)))
+
+    def _update_empty_hint(self) -> None:
+        """Прячет подсказку первого запуска, когда список уже не пуст."""
+        self.empty_hint.setVisible(empty_hint_visible(len(self.devices)))
 
     def _create_tray(self) -> None:
         """Создаёт значок в трее: без него окно закрывалось бы насовсем."""
@@ -785,6 +812,7 @@ class MainWindow(QMainWindow):
         self._update_selection()
         self._update_bulk_actions()
         self._update_status_pill()
+        self._update_empty_hint()
         self.refresh_statuses()
 
     def _check_item(self, device: Device) -> QTableWidgetItem:
