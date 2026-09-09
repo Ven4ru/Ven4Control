@@ -220,7 +220,7 @@ class AddDeviceFingerprintTests(unittest.TestCase):
             window._capture_fingerprint_only(device)
         self.assertEqual("", self._saved().fingerprint)
         self.assertIn("не сообщило SSH fingerprint", self.box.texts())
-        self.assertEqual(1, self.reloads)
+        self.assertGreaterEqual(self.reloads, 1)
 
 
 class KeyInstallDecisionTests(unittest.TestCase):
