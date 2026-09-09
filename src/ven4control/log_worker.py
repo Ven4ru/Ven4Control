@@ -20,12 +20,24 @@ from ven4control.models import Device
 from ven4control.remote_control import (
     LOG_SOURCES,
     METRICS_COMMAND,
+    WINDOWS_UNSUPPORTED,
     FingerprintError,
     _connect,
     _run,
     detect_platform,
     parse_metrics,
 )
+
+
+class UnsupportedPlatformError(RuntimeError):
+    """Платформа устройства не умеет того, что просит сессия.
+
+    Как и `FingerprintError`, переживать переподключением бессмысленно:
+    на Windows команда журнала завершается сразу же, а пустой поток
+    неотличим от обрыва связи — без отдельного класса ошибки сессия
+    уходила в вечный цикл переподключений, дописывая маркеры разрыва
+    в файл журнала на диске.
+    """
 
 
 # Задержки между попытками переподключения, секунды. После исчерпания списка
@@ -87,8 +99,11 @@ def build_stream_command(platform: str, source: str = "system") -> str:
 
     Платформа определяет только порядок проверки: обе ветки остаются в
     команде, поэтому Linux без journalctl (busybox-контейнер) и OpenWrt
-    с systemd не остаются без журнала.
+    с systemd не остаются без журнала. Windows-аналога нет ни у одной из
+    них — там сессию нужно останавливать, а не переподключать.
     """
+    if platform == "windows":
+        raise UnsupportedPlatformError(WINDOWS_UNSUPPORTED)
     if source not in LOG_SOURCES:
         raise ValueError("Неизвестный источник журнала")
     filter_word, unit = LOG_SOURCES[source]
@@ -240,6 +255,12 @@ class LogStreamWorker:
                     await self._session(connection)
                 except asyncio.CancelledError:
                     raise
+                except UnsupportedPlatformError as error:
+                    # Переподключение ничего не изменит: команды журнала на
+                    # этой платформе нет вовсе.
+                    self._emit(f"=== СЕССИЯ ОСТАНОВЛЕНА: {error} ===")
+                    self._set_status(STATUS_FAILED)
+                    return
                 except Exception as error:
                     disconnected_at = asyncio.get_running_loop().time()
                     self._emit(disconnected_marker(error))

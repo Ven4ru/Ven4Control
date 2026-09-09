@@ -1,5 +1,7 @@
 import asyncio
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -8,8 +10,10 @@ from ven4control.remote_control import (
     MAX_LOG_LINES,
     METRICS_COMMAND,
     MIN_LOG_LINES,
+    WINDOWS_UNSUPPORTED,
     PackageResult,
     _first_health_message,
+    backup_configs,
     build_backup_command,
     build_log_command,
     check_rdp,
@@ -19,6 +23,11 @@ from ven4control.remote_control import (
     install_package,
     install_ven4tools,
     is_rdp_enabled,
+    list_services,
+    read_logs,
+    reboot_device,
+    restart_service,
+    update_packages,
     parse_apk_search,
     parse_apt_search,
     parse_metrics,
@@ -165,6 +174,64 @@ def patched_connect(connection: FakeConnection):
         return connection
 
     return patch("ven4control.remote_control._connect", connect)
+
+
+class WindowsGuardTests(unittest.TestCase):
+    """POSIX-операции обязаны отказывать Windows понятным текстом.
+
+    На PowerShell `systemctl`, `logread`, `apt-get` и `tar` дают мусорную
+    ошибку «не является внутренней или внешней командой» — пользователь
+    из неё ничего не понимает. Реализация Windows-аналогов — отдельная
+    работа; отказ должен быть честным уже сейчас.
+    """
+
+    def _refuse(self, operation, forbidden: str) -> None:
+        connection = windows_connection()
+        with patched_connect(connection):
+            with self.assertRaises(RuntimeError) as raised:
+                asyncio.run(operation(connection))
+        self.assertEqual(WINDOWS_UNSUPPORTED, str(raised.exception))
+        self.assertNotIn(forbidden, " ".join(connection.commands))
+        self.assertTrue(connection.closed)
+
+    def test_overview_is_refused(self) -> None:
+        self._refuse(lambda _c: collect_overview(device(), {}), "/proc/stat")
+
+    def test_service_list_is_refused(self) -> None:
+        self._refuse(lambda _c: list_services(device(), {}), "systemctl")
+
+    def test_logs_are_refused(self) -> None:
+        self._refuse(lambda _c: read_logs(device(), {}, "system"), "logread")
+
+    def test_service_restart_is_refused(self) -> None:
+        self._refuse(lambda _c: restart_service(device(), {}, "sshd"), "systemctl")
+
+    def test_reboot_is_refused(self) -> None:
+        self._refuse(lambda _c: reboot_device(device(), {}), "reboot")
+
+    def test_package_update_is_refused(self) -> None:
+        self._refuse(lambda _c: update_packages(device(), {}), "apt-get")
+
+    def test_backup_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "копии"
+            self._refuse(lambda _c: backup_configs(device(), {}, destination), "tar")
+            # Пустая папка копий создавала бы вид, что копия делается.
+            self.assertFalse(destination.exists())
+
+    def test_backup_command_has_no_windows_variant(self) -> None:
+        with self.assertRaises(RuntimeError) as raised:
+            build_backup_command("windows", "/tmp/копия.tar.gz")
+        self.assertEqual(WINDOWS_UNSUPPORTED, str(raised.exception))
+
+    def test_posix_devices_are_untouched(self) -> None:
+        """Отказ касается только Windows: роутер работает как раньше."""
+        connection = openwrt_connection(
+            ("sysupgrade", "", 0),
+            ("logread", "строка журнала\n", 0),
+        )
+        with patched_connect(connection):
+            self.assertIn("строка журнала", asyncio.run(read_logs(device(), {}, "system")))
 
 
 class RdpStateParsingTests(unittest.TestCase):
