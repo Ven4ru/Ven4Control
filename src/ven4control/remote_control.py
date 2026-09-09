@@ -89,6 +89,27 @@ POSIX_PLATFORM_COMMAND = (
 )
 
 
+PACKAGE_MANAGER_MISSING = "Менеджер пакетов не найден"
+
+# Проба «что реально стоит на устройстве»: OpenWrt бывает и на apk (25.12+),
+# и на opkg (23.05 и раньше), причём вывод у них РАЗНОГО ФОРМАТА — `apk search
+# -v -d` даёт «имя-версия-релиз - описание», `opkg list` даёт «имя - версия -
+# описание». Один парсер на оба формата разбирает opkg-строку неверно: режет
+# от имени пакета кусок, приняв его за версию (`kmod-r8168` теряет `r8168`),
+# и кладёт в описание версию. Поэтому менеджер узнаётся ОТДЕЛЬНОЙ командой
+# ДО поиска, а не угадывается по платформе: пара байт трафика взамен
+# установки пакета под несуществующим именем.
+#
+# Маркер в общем выводе поиска (`echo apk` первой строкой) обошёлся бы без
+# лишнего запроса, но он занял бы одну позицию в `| head -n {limit}` — и
+# стартовый каталог с limit=200 показывал бы 199 пакетов.
+OPENWRT_PACKAGE_MANAGER_COMMAND = (
+    "if command -v apk >/dev/null 2>&1; then echo apk; "
+    "elif command -v opkg >/dev/null 2>&1; then echo opkg; "
+    "else echo none; fi"
+)
+
+
 # Ветка реестра службы удалённых рабочих столов Windows.
 TERMINAL_SERVER_KEY = "HKLM:\\System\\CurrentControlSet\\Control\\Terminal Server"
 
@@ -393,6 +414,22 @@ async def detect_platform(
     if not lines:
         raise RuntimeError("Не удалось определить систему устройства.")
     return lines[0], lines[1] if len(lines) > 1 else lines[0]
+
+
+async def detect_openwrt_package_manager(
+    connection: asyncssh.SSHClientConnection,
+) -> str:
+    """Какой менеджер пакетов есть на OpenWrt-устройстве: apk, opkg или none.
+
+    Берётся последняя непустая строка: перед ответом оболочка могла напечатать
+    что-нибудь своё (баннер, предупреждение профиля), а сам ответ печатается
+    последним. Всё, что не apk и не opkg, считается «менеджера нет» — гадать
+    по мусорному ответу опаснее, чем честно отказать.
+    """
+    result = await _run(connection, OPENWRT_PACKAGE_MANAGER_COMMAND, timeout=20)
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    answer = lines[-1] if lines else ""
+    return answer if answer in ("apk", "opkg") else "none"
 
 
 async def _require_windows(
@@ -790,16 +827,21 @@ async def search_packages(
             command = f"winget search {ps_quote(term)} --accept-source-agreements"
             parser = parse_winget_search
         elif platform == "openwrt":
-            command = (
-                "if command -v apk >/dev/null 2>&1; then "
-                "apk update >/dev/null 2>&1; "
-                f"apk search -v -d {safe_term} 2>/dev/null; "
-                "elif command -v opkg >/dev/null 2>&1; then "
-                "opkg update >/dev/null 2>&1; "
-                f"opkg list 2>/dev/null | grep -i {safe_term}; "
-                "else echo 'Менеджер пакетов не найден' >&2; exit 127; fi"
-            )
-            parser = parse_apk_search
+            manager = await detect_openwrt_package_manager(connection)
+            if manager == "apk":
+                command = (
+                    "apk update >/dev/null 2>&1; "
+                    f"apk search -v -d {safe_term} 2>/dev/null"
+                )
+                parser = parse_apk_search
+            elif manager == "opkg":
+                command = (
+                    "opkg update >/dev/null 2>&1; "
+                    f"opkg list 2>/dev/null | grep -i {safe_term}"
+                )
+                parser = parse_opkg_search
+            else:
+                raise RuntimeError(PACKAGE_MANAGER_MISSING)
         else:
             command = (
                 "sudo -n apt-get update >/dev/null 2>&1; "
