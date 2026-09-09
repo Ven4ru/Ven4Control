@@ -680,6 +680,42 @@ class InstallVen4ToolsTests(unittest.TestCase):
         executed = connection.commands[-1]
         self.assertIn("SilentlyContinue", executed)
 
+    def _install_command(self) -> str:
+        connection = windows_connection(
+            ("Invoke-RestMethod", "Ven4Tools v5.1.1 установлен", 0)
+        )
+        with patched_connect(connection):
+            asyncio.run(install_ven4tools(device(), {}))
+        return connection.commands[-1]
+
+    def test_archive_hash_is_compared_with_the_release_digest(self) -> None:
+        """Ответ GitHub API уже содержит digest: отдельный запрос не нужен."""
+        command = self._install_command()
+        self.assertIn("Get-FileHash", command)
+        self.assertIn("$asset.digest", command)
+
+    def test_nothing_is_unpacked_until_the_hash_matches(self) -> None:
+        command = self._install_command()
+        check = command.index("Get-FileHash")
+        unpack = command.index("Expand-Archive")
+        self.assertLess(check, unpack)
+        # Между проверкой и распаковкой обязаны стоять удаление архива и
+        # обрыв установки, иначе проверка ничего не защищает.
+        between = command[check:unpack]
+        self.assertIn("throw", between)
+        self.assertIn("Remove-Item", between)
+
+    def test_comparison_ignores_the_letter_case(self) -> None:
+        command = self._install_command()
+        self.assertIn("ToLower", command)
+
+    def test_release_without_a_digest_is_refused(self) -> None:
+        """Нечего сверять — установка не начинается, а не идёт вслепую."""
+        command = self._install_command()
+        prefix = command[: command.index("Get-FileHash")]
+        self.assertIn("-not $expected", prefix)
+        self.assertIn("throw", prefix[prefix.index("$asset.digest"):])
+
     def test_dropped_channel_after_real_success_is_confirmed_by_verification(self) -> None:
         # Живая находка на VenchWork: основная команда рвётся с
         # exit_status=None и пустым выводом уже ПОСЛЕ того, как установка

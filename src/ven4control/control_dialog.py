@@ -36,6 +36,8 @@ from ven4control.log_worker import status_label
 from ven4control.models import Device
 from ven4control.remote_control import (
     MISSING_FINGERPRINT_MESSAGE,
+    VEN4TOOLS_INSTALL_PATH,
+    VEN4TOOLS_REPO,
     PackageResult,
     ServiceInfo,
     SystemOverview,
@@ -64,6 +66,23 @@ from ven4control.sftp_session import (
 # Сколько строк живого просмотра держать в памяти: журнал целиком пишется
 # в файл сессии, окно нужно только для наблюдения.
 MAX_LIVE_LINES = 2000
+
+
+def ven4tools_confirmation(device_name: str) -> str:
+    """Текст согласия на установку Ven4Tools на устройство.
+
+    Ven4Tools — отдельный продукт, а не часть Ven4Control: пользователь
+    должен понимать, что именно и откуда попадёт на его машину.
+    """
+    return (
+        f"На устройство «{device_name}» будет установлен Ven4Tools — "
+        "отдельное приложение того же автора, не часть Ven4Control.\n\n"
+        f"Последний релиз скачивается с GitHub ({VEN4TOOLS_REPO}), "
+        "проверяется по контрольной сумме sha256 из ответа GitHub API и "
+        f"распаковывается в {VEN4TOOLS_INSTALL_PATH} на устройстве. "
+        "Совпадающие файлы в этой папке перезаписываются.\n\n"
+        "Продолжить?"
+    )
 
 
 class TaskSignals(QObject):
@@ -718,6 +737,17 @@ class DeviceControlDialog(QDialog):
         )
 
     def install_ven4tools_on_device(self) -> None:
+        # Это установка постороннего кода на чужое устройство: без
+        # отдельного согласия кнопка делала бы это по одному клику.
+        answer = QMessageBox.question(
+            self,
+            "Установка Ven4Tools",
+            ven4tools_confirmation(self.device.name),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
         self._start(
             lambda: install_ven4tools(self.device, self.credentials),
             lambda result: self.apps_output.setPlainText(str(result)),

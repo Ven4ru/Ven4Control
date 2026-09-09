@@ -899,6 +899,20 @@ async def install_ven4tools(device: Device, credentials: dict[str, str]) -> str:
             "if (-not $asset) { throw 'В последнем релизе Ven4Tools нет ZIP-архива.' }; "
             '$zipPath = "$env:TEMP\\ven4tools-update.zip"; '
             "Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath; "
+            # Целостность сверяется до распаковки: иначе на устройстве
+            # выполнился бы посторонний код, который никто не проверял.
+            # Хеш уже лежит в ответе GitHub API рядом со ссылкой на
+            # архив (поле digest вида «sha256:<hex>»), отдельный запрос
+            # за ним не нужен. Регистр hex не гарантирован ни одной из
+            # сторон, поэтому сравнение приводится к нижнему.
+            "$expected = ($asset.digest -replace '^sha256:', ''); "
+            "if (-not $expected) { Remove-Item $zipPath -Force; "
+            "throw 'Релиз не содержит контрольной суммы — установка отменена.' }; "
+            "$actual = (Get-FileHash -Algorithm SHA256 -Path $zipPath).Hash; "
+            "if ($actual.ToLower() -ne $expected.ToLower()) { "
+            "Remove-Item $zipPath -Force; "
+            "throw 'Проверка целостности скачанного архива не пройдена — "
+            "установка отменена.' }; "
             f"Expand-Archive -Path $zipPath -DestinationPath {ps_quote(VEN4TOOLS_INSTALL_PATH)} -Force; "
             "Remove-Item $zipPath -Force; "
             f"Set-Content -Path {ps_quote(VEN4TOOLS_VERSION_MARKER)} -Value $release.tag_name -NoNewline; "
