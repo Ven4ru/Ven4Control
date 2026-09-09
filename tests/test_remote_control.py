@@ -767,8 +767,33 @@ class InstallPackageTests(unittest.TestCase):
         with patched_connect(connection):
             asyncio.run(install_package(device(), {}, "pkg`whoami`"))
         executed = connection.commands[-1]
-        self.assertIn("apk add 'pkg`whoami`'", executed)
+        self.assertIn("'pkg`whoami`'", executed)
         self.assertNotIn("apk add pkg`whoami`", executed)
+
+    def test_openwrt_commands_end_options_before_the_package_name(self) -> None:
+        # shlex.quote не спасает от имени, которое выглядит как флаг:
+        # `--` закрывает список опций у обоих менеджеров OpenWrt.
+        connection = openwrt_connection(("apk add", "OK", 0))
+        with patched_connect(connection):
+            asyncio.run(install_package(device(), {}, "-oPwn"))
+        executed = connection.commands[-1]
+        # shlex.quote оставляет такое имя без кавычек — оно из «безопасных»
+        # символов, и без `--` менеджер разобрал бы его как опцию.
+        self.assertIn("apk add -- -oPwn", executed)
+        self.assertIn("opkg install -- -oPwn", executed)
+
+    def test_apt_command_ends_options_before_the_package_name(self) -> None:
+        connection = FakeConnection(
+            [
+                ("$PSVersionTable", *SHELL_SYNTAX_ERROR),
+                ("uname", "linux\nUbuntu 24.04\n", 0),
+                ("apt-get install", "OK", 0),
+            ]
+        )
+        with patched_connect(connection):
+            asyncio.run(install_package(device(), {}, "-oDpkg::Pre-Invoke::=id"))
+        executed = connection.commands[-1]
+        self.assertIn("apt-get install -y -- -oDpkg::Pre-Invoke::=id", executed)
 
 
 class SearchPackagesWindowsTests(unittest.TestCase):

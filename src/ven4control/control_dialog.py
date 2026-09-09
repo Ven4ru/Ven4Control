@@ -54,6 +54,11 @@ from ven4control.remote_control import (
     search_packages,
     update_packages,
 )
+from ven4control.message_box import (
+    device_critical,
+    device_information,
+    device_warning,
+)
 from ven4control.sftp_session import (
     RemoteEntry,
     SftpSession,
@@ -66,6 +71,21 @@ from ven4control.sftp_session import (
 # Сколько строк живого просмотра держать в памяти: журнал целиком пишется
 # в файл сессии, окно нужно только для наблюдения.
 MAX_LIVE_LINES = 2000
+
+
+def safe_local_name(name: str) -> str:
+    """Чистое базовое имя файла для диалога сохранения на компьютере.
+
+    Имя приходит из SFTP-листинга устройства, поэтому в нём могут оказаться
+    разделители пути или `..`: тогда предложенный путь увёл бы диалог из
+    домашней папки. Пользователь всё равно подтверждает сохранение сам, но
+    подставлять ему чужой путь незачем.
+    """
+    cleaned = name.replace("\\", "/").rsplit("/", 1)[-1]
+    # `C:файл` на Windows означает «относительно текущей папки диска C».
+    cleaned = cleaned.rsplit(":", 1)[-1]
+    cleaned = cleaned.strip().lstrip(".")
+    return cleaned or "файл"
 
 
 def ven4tools_confirmation(device_name: str) -> str:
@@ -339,7 +359,7 @@ class DeviceControlDialog(QDialog):
                 export_format=export_format,
             )
         except Exception as error:
-            QMessageBox.critical(self, "Сессия не запущена", str(error))
+            device_critical(self, "Сессия не запущена", str(error))
             return
         self.background_output.clear()
         self._update_background_controls()
@@ -461,7 +481,7 @@ class DeviceControlDialog(QDialog):
             self.files.start()
         except Exception as error:
             self.files_status.setText(str(error))
-            QMessageBox.warning(self, "Файлы недоступны", str(error))
+            device_warning(self, "Файлы недоступны", str(error))
             return
         self.files_status.setText("Подключение к устройству…")
         self.files.list_directory()
@@ -501,7 +521,7 @@ class DeviceControlDialog(QDialog):
             )
             return
         target, _filter = QFileDialog.getSaveFileName(
-            self, "Сохранить файл", str(Path.home() / entry.name)
+            self, "Сохранить файл", str(Path.home() / safe_local_name(entry.name))
         )
         if not target:
             return
@@ -561,13 +581,13 @@ class DeviceControlDialog(QDialog):
         # Отказ листинга виден в строке состояния, а прерванная передача —
         # это уже потерянная работа пользователя, о ней говорим отдельно.
         if was_busy:
-            QMessageBox.warning(self, "Передача не выполнена", message)
+            device_warning(self, "Передача не выполнена", message)
 
     def _files_transfer_finished(self, message: str) -> None:
         self.files_busy = False
         self.files_status.setText(message)
         self._update_files_controls()
-        QMessageBox.information(self, "Передача завершена", message)
+        device_information(self, "Передача завершена", message)
 
     def _update_files_controls(self) -> None:
         available = self.files.ready and not self.files_busy
@@ -772,7 +792,7 @@ class DeviceControlDialog(QDialog):
         def failed(error: str) -> None:
             self.tasks.discard(task)
             self.status.setText("Ошибка")
-            QMessageBox.critical(self, "Ошибка управления", error)
+            device_critical(self, "Ошибка управления", error)
 
         task.signals.finished.connect(finished)
         task.signals.failed.connect(failed)
@@ -919,7 +939,7 @@ class DeviceControlDialog(QDialog):
 
     def _operation_done(self, message: str, refresh_services: bool = False) -> None:
         self.maintenance_output.setPlainText(message)
-        QMessageBox.information(self, "Операция завершена", message)
+        device_information(self, "Операция завершена", message)
         if refresh_services:
             self.refresh_services()
 

@@ -945,17 +945,19 @@ async def install_package(
                 "--accept-package-agreements --accept-source-agreements"
             )
         elif platform == "openwrt":
+            # `--` закрывает список опций: shlex.quote не мешает имени пакета
+            # выглядеть как флаг, а имена приходят с самого устройства.
             command = (
                 "if command -v apk >/dev/null 2>&1; then "
-                f"apk add {safe_name}; "
+                f"apk add -- {safe_name}; "
                 "elif command -v opkg >/dev/null 2>&1; then "
-                f"opkg install {safe_name}; "
+                f"opkg install -- {safe_name}; "
                 "else echo 'Менеджер пакетов не найден' >&2; exit 127; fi"
             )
         else:
             command = (
                 "sudo -n env DEBIAN_FRONTEND=noninteractive "
-                f"apt-get install -y {safe_name}"
+                f"apt-get install -y -- {safe_name}"
             )
         result = await _run(connection, command, timeout=300, check=True)
         return result.stdout.strip() or f"Пакет «{name}» установлен."

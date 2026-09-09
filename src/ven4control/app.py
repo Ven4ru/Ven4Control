@@ -21,6 +21,11 @@ from ven4control.credentials import CredentialStore
 from ven4control.dialogs import AddDeviceDialog, InstructionsDialog, SettingsDialog
 from ven4control.log_sessions import preferred_export_format, session_manager
 from ven4control.log_worker import status_label
+from ven4control.message_box import (
+    device_critical,
+    device_information,
+    device_warning,
+)
 from ven4control.models import Device
 from ven4control.paths import APP_KEY_PATH, BACKUP_DIR, DB_PATH
 from ven4control.rdp_tunnel import (
@@ -124,6 +129,19 @@ EMPTY_LIST_HINT = (
     "Нажмите «Добавить» в панели слева, чтобы завести первое устройство, "
     "или «Импорт Tailscale», если они уже есть в вашем tailnet."
 )
+
+
+def terminal_tab_title(device_name: str) -> str:
+    """Заголовок вкладки Windows Terminal для устройства.
+
+    Windows Terminal разбирает свою командную строку сам, и `;` разделяет в
+    ней под-команды. Имя устройства обычно вводит сам пользователь, но при
+    импорте из Tailscale оно приходит от владельца соседнего устройства в
+    tailnet, поэтому точка с запятой убирается. Отображаемое имя устройства
+    при этом не меняется — правка только для аргумента `--title`.
+    """
+    cleaned = device_name.replace(";", "").strip()
+    return cleaned or "Устройство"
 
 
 def empty_hint_visible(total: int) -> bool:
@@ -914,7 +932,7 @@ class MainWindow(QMainWindow):
                 # любого типа входа, она ничего не аутентифицирует.
                 self._capture_fingerprint_only(device)
         except Exception as error:
-            QMessageBox.critical(self, "Ошибка", str(error))
+            device_critical(self, "Ошибка", str(error))
 
     def _install_key(self, device: Device, password: str) -> None:
         """Добавление по паролю: сначала fingerprint, потом попытка ключа."""
@@ -958,7 +976,7 @@ class MainWindow(QMainWindow):
             )
         )
         worker.signals.failed.connect(
-            lambda error: QMessageBox.warning(
+            lambda error: device_warning(
                 self,
                 "Устройство добавлено, но fingerprint не получен",
                 f"Не удалось получить SSH fingerprint устройства «{device.name}»:\n"
@@ -1061,7 +1079,7 @@ class MainWindow(QMainWindow):
             )
             self.reload()
             return
-        QMessageBox.information(
+        device_information(
             self, "Ключ установлен", f"Устройство определено как {system}. Вход по ключу настроен."
         )
         self.reload()
@@ -1104,7 +1122,9 @@ class MainWindow(QMainWindow):
     def open_terminal(self, device: Device) -> None:
         args = terminal_command(device)
         try:
-            subprocess.Popen(["wt.exe", "new-tab", "--title", device.name, *args])
+            subprocess.Popen(
+                ["wt.exe", "new-tab", "--title", terminal_tab_title(device.name), *args]
+            )
             return
         except FileNotFoundError:
             pass
@@ -1143,7 +1163,7 @@ class MainWindow(QMainWindow):
         try:
             self.tunnels.start(device, self.device_credentials(device))
         except Exception as error:
-            QMessageBox.critical(self, "RDP не запущен", str(error))
+            device_critical(self, "RDP не запущен", str(error))
             return
         self._update_selection()
 
@@ -1287,7 +1307,7 @@ class MainWindow(QMainWindow):
         if generation != self.status_generation:
             return
         self._update_selection()
-        QMessageBox.warning(self, "Проверка RDP не выполнена", error)
+        device_warning(self, "Проверка RDP не выполнена", error)
 
     def enable_selected_rdp(self) -> None:
         """Разрешает приём RDP на устройстве. Файрвол при этом не трогается."""
@@ -1355,7 +1375,7 @@ class MainWindow(QMainWindow):
         if generation != self.status_generation:
             return
         self._update_selection()
-        QMessageBox.critical(self, "RDP не включён", error)
+        device_critical(self, "RDP не включён", error)
 
     def device_credentials(self, device: Device, silent: bool = False) -> dict[str, str]:
         credentials = {"password": "", "passphrase": ""}
@@ -1412,7 +1432,7 @@ class MainWindow(QMainWindow):
                 export_format=preferred_export_format(),
             )
         except Exception as error:
-            QMessageBox.critical(self, "Сессия не запущена", str(error))
+            device_critical(self, "Сессия не запущена", str(error))
             return
         self._remember_logging(device, True)
         self._update_selection()
@@ -1576,7 +1596,7 @@ class MainWindow(QMainWindow):
         self._bulk_expected = []
         self._bulk_results = {}
         self._update_bulk_actions()
-        QMessageBox.information(self, title, report)
+        device_information(self, title, report)
 
     def delete_device(self, device: Device) -> None:
         if device.id is None:

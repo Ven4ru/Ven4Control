@@ -1,4 +1,5 @@
 import unittest
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -29,6 +30,7 @@ from ven4control.app import (
     tailscale_candidates,
     tailscale_import_report,
     terminal_command,
+    terminal_tab_title,
 )
 from ven4control.dialogs import USERNAME_PLACEHOLDER
 from ven4control.models import Device
@@ -81,6 +83,21 @@ class FakeMessageBox:
 
     def texts(self) -> str:
         return "\n".join(text for _kind, _title, text in self.shown)
+
+
+@contextmanager
+def patched_dialogs(box: FakeMessageBox):
+    """Подменяет и статические QMessageBox, и обёртки для текста устройства.
+
+    Вывод удалённых операций показывается через `device_*` (PlainText), а не
+    через статические методы, поэтому одного патча QMessageBox уже мало.
+    """
+    with ExitStack() as stack:
+        stack.enter_context(patch("ven4control.app.QMessageBox", box))
+        stack.enter_context(patch("ven4control.app.device_information", box.information))
+        stack.enter_context(patch("ven4control.app.device_warning", box.warning))
+        stack.enter_context(patch("ven4control.app.device_critical", box.critical))
+        yield
 
 
 def run_worker(worker) -> None:
@@ -148,7 +165,7 @@ class AddDeviceFingerprintTests(unittest.TestCase):
         with (
             patch("ven4control.app.probe_device", self._probe()),
             patch("ven4control.app.install_public_key", install),
-            patch("ven4control.app.QMessageBox", self.box),
+            patched_dialogs(self.box),
         ):
             window._install_key(device, "секрет")
 
@@ -170,7 +187,7 @@ class AddDeviceFingerprintTests(unittest.TestCase):
         with (
             patch("ven4control.app.probe_device", self._probe()),
             patch("ven4control.app.install_public_key", install),
-            patch("ven4control.app.QMessageBox", self.box),
+            patched_dialogs(self.box),
         ):
             window._install_key(device, "секрет")
 
@@ -190,7 +207,7 @@ class AddDeviceFingerprintTests(unittest.TestCase):
         with (
             patch("ven4control.app.probe_device", self._probe("SHA256:ready")),
             patch("ven4control.app.install_public_key", install),
-            patch("ven4control.app.QMessageBox", self.box),
+            patched_dialogs(self.box),
         ):
             window._capture_fingerprint_only(device)
 
@@ -203,7 +220,7 @@ class AddDeviceFingerprintTests(unittest.TestCase):
         window = self._window()
         with (
             patch("ven4control.app.probe_device", self._probe()),
-            patch("ven4control.app.QMessageBox", self.box),
+            patched_dialogs(self.box),
         ):
             window._capture_fingerprint_only(device)
         self.assertEqual("", self._saved().fingerprint)
@@ -217,7 +234,7 @@ class AddDeviceFingerprintTests(unittest.TestCase):
         window = self._window()
         with (
             patch("ven4control.app.probe_device", probe),
-            patch("ven4control.app.QMessageBox", self.box),
+            patched_dialogs(self.box),
         ):
             window._capture_fingerprint_only(device)
         self.assertEqual("", self._saved().fingerprint)
@@ -502,7 +519,7 @@ class TailscaleImportFlowTests(unittest.TestCase):
                 "ven4control.app.QInputDialog.getText",
                 return_value=(username, accepted),
             ),
-            patch("ven4control.app.QMessageBox", self.box),
+            patched_dialogs(self.box),
         ):
             window.import_tailscale()
         return window
@@ -652,6 +669,38 @@ class EmptyHintTests(unittest.TestCase):
         window.devices = [Device(1, "Роутер", "192.168.1.1", 22, "root")]
         MainWindow._update_empty_hint(window)
         self.assertFalse(window.empty_hint.visible)
+
+
+class TerminalTabTitleTests(unittest.TestCase):
+    """Имя устройства из tailnet не должно расщеплять команду wt.exe."""
+
+    def test_ordinary_name_is_unchanged(self) -> None:
+        self.assertEqual("Домашний ПК", terminal_tab_title("Домашний ПК"))
+
+    def test_semicolon_is_removed(self) -> None:
+        # Windows Terminal сам разбирает свою командную строку, и `;`
+        # разделяет в ней под-команды: имя пира задаёт чужой владелец.
+        self.assertEqual(
+            "pc split-pane",
+            terminal_tab_title("pc; split-pane"),
+        )
+
+    def test_every_semicolon_is_removed(self) -> None:
+        self.assertNotIn(";", terminal_tab_title("a;b;c;"))
+
+    def test_name_of_only_semicolons_falls_back(self) -> None:
+        self.assertEqual("Устройство", terminal_tab_title(";;;"))
+
+    def test_open_terminal_passes_the_cleaned_title(self) -> None:
+        window = MainWindow.__new__(MainWindow)
+        launched: list[list[str]] = []
+        with patch("ven4control.app.subprocess.Popen", side_effect=launched.append):
+            MainWindow.open_terminal(
+                window, Device(1, "pc; split-pane", "100.64.0.7", 22, "root")
+            )
+        self.assertEqual(1, len(launched))
+        self.assertNotIn("pc; split-pane", launched[0])
+        self.assertIn("pc split-pane", launched[0])
 
 
 class SectionHeaderTextTests(unittest.TestCase):
