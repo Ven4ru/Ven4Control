@@ -24,8 +24,6 @@ MAX_LOG_LINES = 1000
 LOG_SOURCES: dict[str, tuple[str, str]] = {
     "system": ("", ""),
     "tailscale": ("tailscale", "tailscaled"),
-    "adguard": ("adguard", "AdGuardHome"),
-    "xray": ("xray", "xray"),
 }
 
 
@@ -843,8 +841,8 @@ async def install_ven4tools(device: Device, credentials: dict[str, str]) -> str:
     (без него Invoke-WebRequest зависает на неинтерактивной SSH-сессии на
     некоторых машинах).
 
-    Живая находка на VenchWork: при долгом скачивании SSH-канал клиента
-    может оборваться уже ПОСЛЕ того, как установка на устройстве реально
+    Живая находка: при долгом скачивании SSH-канал клиента может
+    оборваться уже ПОСЛЕ того, как установка на устройстве реально
     завершилась — `_run` в этом случае получает `exit_status=None` и
     пустой вывод (не `TimeoutError`, соединение не зависает, оно рвётся
     именно в момент завершения передачи) и репортует это как обычную
@@ -880,8 +878,8 @@ async def install_ven4tools(device: Device, credentials: dict[str, str]) -> str:
             result = await _run(connection, command, timeout=600, check=True)
             return result.stdout.strip()
         except RuntimeError as error:
-            # Живая находка на VenchWork: после того как канал рвётся во
-            # время долгой передачи, само SSH-соединение (не только этот
+            # Живая находка: после того как канал рвётся во время долгой
+            # передачи, само SSH-соединение (не только этот
             # канал) оказывается непригодно для новых команд — повторное
             # использование того же `connection` для проверки надёжно не
             # срабатывает. Проверка открывает СВОЁ отдельное соединение.
@@ -992,8 +990,7 @@ def build_backup_command(platform: str, remote_path: str) -> str:
         return f"sysupgrade -b {remote_path}"
     return (
         "set -u; files=''; "
-        "for p in /etc/ssh /etc/systemd/system /etc/wireguard "
-        "/etc/xray /opt/AdGuardHome/AdGuardHome.yaml; do "
+        "for p in /etc/ssh /etc/systemd/system /etc/wireguard; do "
         "if [ -e \"$p\" ]; then files=\"$files ${p#/}\"; fi; done; "
         "if [ -z \"$files\" ]; then "
         "echo 'На устройстве нет конфигов для копирования' >&2; exit 1; fi; "

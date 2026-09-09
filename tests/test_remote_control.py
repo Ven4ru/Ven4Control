@@ -137,8 +137,6 @@ class LogCommandTests(unittest.TestCase):
         for source, unit in (
             ("system", ""),
             ("tailscale", "tailscaled"),
-            ("adguard", "AdGuardHome"),
-            ("xray", "xray"),
         ):
             with self.subTest(source=source):
                 command = build_log_command(source, 200)
@@ -453,8 +451,8 @@ class OpkgSearchParsingTests(unittest.TestCase):
 
 
 class AptSearchParsingTests(unittest.TestCase):
-    """Строки — реальный вывод `apt-cache search sftp` с VPS
-    (138.16.152.133, Ubuntu 24.04), не выдуманы."""
+    """Строки — реальный вывод `apt-cache search sftp` с живого
+    Ubuntu 24.04-сервера, не выдуманы."""
 
     def test_real_output_from_a_live_server(self) -> None:
         output = (

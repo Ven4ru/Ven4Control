@@ -60,7 +60,7 @@ class StreamCommandTests(unittest.TestCase):
         self.assertIn("journalctl -u tailscaled -f", command)
 
     def test_every_source_has_both_variants(self) -> None:
-        for source in ("system", "tailscale", "adguard", "xray"):
+        for source in ("system", "tailscale"):
             for platform in ("openwrt", "linux"):
                 with self.subTest(source=source, platform=platform):
                     command = build_stream_command(platform, source)
