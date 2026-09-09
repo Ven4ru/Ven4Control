@@ -43,6 +43,7 @@ from ven4control.ssh_service import (
     ensure_app_key,
     install_public_key,
     probe_device,
+    probe_fingerprints,
     tcp_check,
 )
 from ven4control.storage import DeviceStorage
@@ -210,8 +211,14 @@ def rdp_cell_text(tunnel: RdpTunnel | None) -> str:
 def tailscale_candidates(
     status: dict,
     existing: set[tuple[str, int]],
+    username: str = "root",
 ) -> list[Device]:
-    """Отбирает пиров Tailscale, которых ещё нет в списке устройств."""
+    """Отбирает пиров Tailscale, которых ещё нет в списке устройств.
+
+    Пользователь спрашивается один раз на весь импорт: `root` подходит
+    только роутерам, а в тейлнете рядом стоят Ubuntu-серверы и
+    Windows-машины, где такой учётной записи нет вовсе.
+    """
     candidates: list[Device] = []
     seen = set(existing)
     for peer in (status.get("Peer") or {}).values():
@@ -227,8 +234,45 @@ def tailscale_candidates(
             continue
         seen.add((host, 22))
         display = str(peer.get("HostName") or peer.get("DNSName") or host).rstrip(".")
-        candidates.append(Device(None, display, host, 22, "root"))
+        candidates.append(Device(None, display, host, 22, username))
     return candidates
+
+
+def tailscale_candidate_line(device: Device) -> str:
+    """Строка кандидата в списке подтверждения импорта."""
+    state = (
+        "отпечаток получен"
+        if device.fingerprint
+        else "не ответило, управление будет недоступно"
+    )
+    return f"• {device.name} — {device.host} — {state}"
+
+
+def tailscale_import_report(
+    username: str,
+    saved: Sequence[Device],
+    skipped: Sequence[str],
+) -> str:
+    """Итог импорта: сколько добавлено, под каким пользователем и что дальше."""
+    if not saved and not skipped:
+        return "Ни одно устройство не добавлено."
+    parts: list[str] = []
+    if saved:
+        silent = [device for device in saved if not device.fingerprint]
+        parts.append(
+            f"Добавлено устройств: {len(saved)}. "
+            f"Пользователь SSH для всех: «{username}»."
+        )
+        if silent:
+            parts.append(
+                f"Без подтверждённого fingerprint: {len(silent)} — эти "
+                "устройства не ответили на SSH-запрос, управлять ими нельзя. "
+                "Когда устройство будет в сети, удалите его и добавьте заново "
+                "кнопкой «Добавить»."
+            )
+    if skipped:
+        parts.append("Не добавлены:\n" + "\n".join(skipped))
+    return "\n\n".join(parts)
 
 
 class WorkerSignals(QObject):
@@ -1566,20 +1610,48 @@ class MainWindow(QMainWindow):
             existing = {
                 (device.host, device.port) for device in self.storage.list_devices()
             }
-            candidates = tailscale_candidates(data, existing)
-            if not candidates:
+            if not tailscale_candidates(data, existing):
                 QMessageBox.information(
                     self, "Tailscale", "Новых устройств Tailscale не найдено."
                 )
                 return
-            names = "\n".join(f"• {item.name} — {item.host}" for item in candidates)
+            username, accepted = QInputDialog.getText(
+                self,
+                "Импорт Tailscale",
+                "Пользователь SSH для найденных устройств:",
+                text="root",
+            )
+            if not accepted:
+                return
+            username = username.strip()
+            if not username:
+                QMessageBox.warning(
+                    self,
+                    "Импорт Tailscale",
+                    "Пользователь SSH не указан: без него подключиться "
+                    "к устройствам не получится.",
+                )
+                return
+            candidates = tailscale_candidates(data, existing, username)
+            # Отпечатки берутся до подтверждения списка: `probe_device`
+            # ничего не аутентифицирует, поэтому вопрос «добавить?» уже
+            # показывает, какие устройства станут управляемыми сразу.
+            # Отдельного подтверждения на каждый отпечаток нет намеренно:
+            # пиры тейлнета уже аутентифицированы ключами WireGuard, а
+            # список устройств пользователь и так видит целиком.
+            fingerprints = asyncio.run(probe_fingerprints(candidates))
+            for device, fingerprint in zip(candidates, fingerprints, strict=True):
+                device.fingerprint = fingerprint
+            names = "\n".join(tailscale_candidate_line(item) for item in candidates)
             answer = QMessageBox.question(
                 self,
                 "Импорт Tailscale",
-                f"Добавить найденные устройства?\n\n{names}",
+                f"Добавить найденные устройства?\n\n"
+                f"Пользователь SSH: «{username}»\n\n{names}",
             )
             if answer != QMessageBox.StandardButton.Yes:
                 return
+            saved: list[Device] = []
             skipped: list[str] = []
             for device in candidates:
                 try:
@@ -1587,13 +1659,14 @@ class MainWindow(QMainWindow):
                 except Exception as error:
                     # Одна проблемная запись не должна прерывать импорт.
                     skipped.append(f"{device.name} — {error}")
+                else:
+                    saved.append(device)
             self.reload()
-            if skipped:
-                QMessageBox.warning(
-                    self,
-                    "Часть устройств не добавлена",
-                    "\n".join(skipped),
-                )
+            QMessageBox.information(
+                self,
+                "Импорт Tailscale",
+                tailscale_import_report(username, saved, skipped),
+            )
         except FileNotFoundError:
             QMessageBox.warning(self, "Tailscale", "Команда tailscale не найдена.")
         except subprocess.TimeoutExpired:

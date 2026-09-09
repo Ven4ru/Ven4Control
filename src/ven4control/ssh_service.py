@@ -1,9 +1,11 @@
+import asyncio
 import base64
 import os
 import socket
 import subprocess
 import tempfile
 import time
+from collections.abc import Sequence
 from pathlib import Path
 
 import asyncssh
@@ -209,3 +211,23 @@ async def probe_device(device: Device) -> str:
     if not pin.fingerprint:
         raise RuntimeError("Устройство не сообщило SSH fingerprint")
     return pin.fingerprint
+
+
+async def probe_fingerprints(
+    devices: Sequence[Device],
+    timeout: float = 5.0,
+) -> list[str]:
+    """Отпечатки нескольких устройств разом; недоступное — пустая строка.
+
+    Нужна массовому импорту, где отвечают не все: пиры тейлнета бывают
+    выключены. Опрос идёт параллельно и с коротким таймаутом — иначе
+    десяток офлайн-устройств ждал бы полный таймаут входа каждый по
+    очереди. Ошибка одного устройства не отменяет остальные.
+    """
+    async def one(device: Device) -> str:
+        return await asyncio.wait_for(probe_device(device), timeout)
+
+    results = await asyncio.gather(
+        *(one(device) for device in devices), return_exceptions=True
+    )
+    return ["" if isinstance(item, BaseException) else str(item) for item in results]

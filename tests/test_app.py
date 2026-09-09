@@ -1,6 +1,7 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from PySide6.QtCore import QCoreApplication
@@ -22,7 +23,9 @@ from ven4control.app import (
     rdp_check_label,
     rdp_state,
     section_header_text,
+    tailscale_candidate_line,
     tailscale_candidates,
+    tailscale_import_report,
     terminal_command,
 )
 from ven4control.dialogs import USERNAME_PLACEHOLDER
@@ -421,6 +424,125 @@ class TailscaleImportTests(unittest.TestCase):
         self.assertEqual(22, candidates[0].port)
         self.assertEqual("root", candidates[0].username)
         self.assertIsNone(candidates[0].id)
+
+    def test_username_applies_to_every_candidate(self) -> None:
+        """`root` неверен для типовой Ubuntu и для Windows-машин в тейлнете."""
+        candidates = tailscale_candidates(self._status(), set(), username="vench")
+        self.assertTrue(candidates)
+        self.assertEqual({"vench"}, {item.username for item in candidates})
+
+    def test_candidate_line_names_the_fingerprint_state(self) -> None:
+        answered = Device(None, "ПК", "100.64.0.2", 22, "vench", fingerprint="SHA256:x")
+        silent = Device(None, "Роутер", "100.64.0.1", 22, "vench")
+        self.assertIn("отпечаток получен", tailscale_candidate_line(answered))
+        self.assertIn("100.64.0.2", tailscale_candidate_line(answered))
+        self.assertIn("не ответило", tailscale_candidate_line(silent))
+
+    def test_report_names_the_applied_username(self) -> None:
+        saved = [
+            Device(None, "ПК", "100.64.0.2", 22, "vench", fingerprint="SHA256:x"),
+            Device(None, "Роутер", "100.64.0.1", 22, "vench"),
+        ]
+        report = tailscale_import_report("vench", saved, [])
+        self.assertIn("vench", report)
+        self.assertIn("Добавлено устройств: 2", report)
+        self.assertIn("Без подтверждённого fingerprint: 1", report)
+
+    def test_report_without_silent_devices_says_nothing_about_them(self) -> None:
+        saved = [Device(None, "ПК", "100.64.0.2", 22, "vench", fingerprint="SHA256:x")]
+        report = tailscale_import_report("vench", saved, [])
+        self.assertNotIn("Без подтверждённого fingerprint", report)
+
+    def test_report_lists_devices_that_were_not_saved(self) -> None:
+        report = tailscale_import_report("vench", [], ["ПК — UNIQUE constraint"])
+        self.assertIn("UNIQUE constraint", report)
+
+
+class TailscaleImportFlowTests(unittest.TestCase):
+    """Импорт должен создавать управляемые устройства, а не строки в списке."""
+
+    def setUp(self) -> None:
+        application()
+        self._directory = TemporaryDirectory()
+        self.addCleanup(self._directory.cleanup)
+        self.storage = DeviceStorage(Path(self._directory.name) / "devices.db")
+        self.box = FakeMessageBox()
+        self.reloads = 0
+
+    def _window(self) -> MainWindow:
+        window = MainWindow.__new__(MainWindow)
+        window.storage = self.storage
+        window.reload = self._count_reload
+        return window
+
+    def _count_reload(self) -> None:
+        self.reloads += 1
+
+    def _status_json(self) -> str:
+        return (
+            '{"Peer": {"a": {"HostName": "router", "TailscaleIPs": ["100.64.0.1"]}, '
+            '"b": {"HostName": "pc", "TailscaleIPs": ["100.64.0.2"]}}}'
+        )
+
+    def _run_import(self, username: str = "vench", accepted: bool = True):
+        completed = SimpleNamespace(stdout=self._status_json())
+
+        async def probe(device: Device) -> str:
+            if device.host == "100.64.0.1":
+                raise OSError("хост недоступен")
+            return "SHA256:pc"
+
+        window = self._window()
+        with (
+            patch("ven4control.app.subprocess.run", return_value=completed),
+            patch("ven4control.ssh_service.probe_device", probe),
+            patch(
+                "ven4control.app.QInputDialog.getText",
+                return_value=(username, accepted),
+            ),
+            patch("ven4control.app.QMessageBox", self.box),
+        ):
+            window.import_tailscale()
+        return window
+
+    def test_answered_peer_is_saved_with_a_fingerprint(self) -> None:
+        self._run_import()
+        saved = {device.host: device for device in self.storage.list_devices()}
+        self.assertEqual("SHA256:pc", saved["100.64.0.2"].fingerprint)
+        self.assertEqual("vench", saved["100.64.0.2"].username)
+
+    def test_silent_peer_is_still_added_without_a_fingerprint(self) -> None:
+        self._run_import()
+        saved = {device.host: device for device in self.storage.list_devices()}
+        self.assertIn("100.64.0.1", saved)
+        self.assertEqual("", saved["100.64.0.1"].fingerprint)
+
+    def test_username_from_the_dialog_replaces_the_hardcoded_root(self) -> None:
+        self._run_import(username="ubuntu")
+        self.assertEqual(
+            {"ubuntu"}, {device.username for device in self.storage.list_devices()}
+        )
+        self.assertIn("ubuntu", self.box.texts())
+
+    def test_cancelled_username_dialog_imports_nothing(self) -> None:
+        self._run_import(accepted=False)
+        self.assertEqual([], self.storage.list_devices())
+
+    def test_empty_username_is_refused(self) -> None:
+        self._run_import(username="   ")
+        self.assertEqual([], self.storage.list_devices())
+        self.assertIn("Пользователь", self.box.texts())
+
+    def test_confirmation_lists_the_fingerprint_state(self) -> None:
+        self._run_import()
+        question = next(text for kind, _t, text in self.box.shown if kind == "question")
+        self.assertIn("отпечаток получен", question)
+        self.assertIn("не ответило", question)
+
+    def test_declined_confirmation_saves_nothing(self) -> None:
+        self.box.answer = QMessageBox.StandardButton.No
+        self._run_import()
+        self.assertEqual([], self.storage.list_devices())
 
     def test_duplicates_inside_one_answer_are_collapsed(self) -> None:
         status = {
