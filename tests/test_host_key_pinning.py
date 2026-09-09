@@ -62,9 +62,17 @@ class LoopbackServer:
         self.accept = accept
         self.public_key_auth = public_key_auth
         self.attempts: list[tuple[str, str]] = []
+        self.commands: list[str] = []
         self.fingerprint = ""
         self.port = 0
         self._server: asyncssh.SSHAcceptor | None = None
+
+    async def _handle(self, process: asyncssh.SSHServerProcess) -> None:
+        command = str(process.command or "")
+        self.commands.append(command)
+        if "openwrt_release" in command:
+            process.stdout.write("openwrt\n")
+        process.exit(0)
 
     async def __aenter__(self) -> "LoopbackServer":
         host_key = asyncssh.generate_private_key("ssh-ed25519")
@@ -76,6 +84,7 @@ class LoopbackServer:
             "127.0.0.1",
             0,
             server_host_keys=[host_key],
+            process_factory=self._handle,
         )
         self.port = self._server.sockets[0].getsockname()[1]
         return self
@@ -182,6 +191,30 @@ class InstallPublicKeyTests(unittest.TestCase):
                     return server.attempts
 
         self.assertEqual([], asyncio.run(scenario()))
+
+    def test_confirmed_fingerprint_lets_the_installation_through(self) -> None:
+        async def scenario() -> tuple[str, list[str]]:
+            with tempfile.TemporaryDirectory() as directory:
+                public_path = Path(directory) / "id_ed25519.pub"
+                key = asyncssh.generate_private_key("ssh-ed25519")
+                public_path.write_bytes(key.export_public_key("openssh"))
+                async with LoopbackServer(
+                    accept=True, public_key_auth=False
+                ) as server:
+                    system = await install_public_key(
+                        server.device(),
+                        "секрет",
+                        public_path,
+                        server.fingerprint,
+                    )
+                    return system, server.commands
+
+        system, commands = asyncio.run(scenario())
+        self.assertEqual("openwrt", system)
+        self.assertTrue(
+            any("/etc/dropbear/authorized_keys" in command for command in commands),
+            commands,
+        )
 
 
 if __name__ == "__main__":
