@@ -284,7 +284,23 @@ class MainWindow(QMainWindow):
         self.resize(980, 600)
         self.storage = DeviceStorage(DB_PATH)
         self.credentials = CredentialStore()
-        self.private_key, self.public_key = ensure_app_key(APP_KEY_PATH)
+        # Ключ приложения не должен ронять запуск: если ACL не применились
+        # (например, учётная запись не сопоставилась с SID), недозащищённый
+        # ключ уже удалён, а окно открывается — устройствами с паролем и с
+        # чужим ключом пользоваться по-прежнему можно.
+        self.private_key, self.public_key = APP_KEY_PATH, APP_KEY_PATH.with_suffix(
+            ".pub"
+        )
+        try:
+            self.private_key, self.public_key = ensure_app_key(APP_KEY_PATH)
+        except Exception as error:
+            QMessageBox.critical(
+                self,
+                "Ключ приложения не создан",
+                f"Не удалось подготовить SSH-ключ Ven4Control:\n{error}\n\n"
+                "Установка ключа на устройства будет недоступна, остальное "
+                "работает как обычно.",
+            )
         self.devices: list[Device] = []
         # Реестр сессий живёт на уровне приложения: закрытие окна и диалогов
         # не должно прерывать фоновое логирование.
@@ -812,11 +828,11 @@ class MainWindow(QMainWindow):
 
     def _install_key(self, device: Device, password: str) -> None:
         def operation():
-            return asyncio.run(probe_device(device, password))
+            return asyncio.run(probe_device(device))
 
         worker = Worker(operation)
         worker.signals.finished.connect(
-            lambda result: self._confirm_key_install(device, password, result)
+            lambda result: self._confirm_key_install(device, password, str(result))
         )
         worker.signals.failed.connect(
             lambda error: QMessageBox.warning(
@@ -827,13 +843,14 @@ class MainWindow(QMainWindow):
         self._start_worker(worker)
 
     def _confirm_key_install(
-        self, device: Device, password: str, result: tuple[str, str]
+        self, device: Device, password: str, fingerprint: str
     ) -> None:
-        system, fingerprint = result
+        # Тип устройства здесь ещё не известен: до подтверждения отпечатка
+        # приложение не отправляет устройству ни пароля, ни команд.
         answer = QMessageBox.question(
             self,
             "Подтверждение SSH fingerprint",
-            f"Тип устройства: {system}\n\nFingerprint сервера:\n{fingerprint}\n\n"
+            f"Fingerprint сервера {device.host}:\n{fingerprint}\n\n"
             "Установить публичный ключ Ven4Control?",
         )
         if answer != QMessageBox.StandardButton.Yes:

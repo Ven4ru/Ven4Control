@@ -1,4 +1,5 @@
 import base64
+import os
 import re
 import subprocess
 import unittest
@@ -155,6 +156,21 @@ class IsEnabledTests(unittest.TestCase):
         self.assertIn("Get-ScheduledTask -TaskName 'Ven4ControlTest'", script)
         # Проверка состояния делается без прав администратора.
         self.assertNotIn("runas", script)
+
+    def test_powershell_is_taken_from_system32(self) -> None:
+        """Имя без пути Windows ищет и в рабочем каталоге процесса.
+
+        Задача регистрируется с правами администратора, поэтому подложенный
+        рядом с `Ven4Control.exe` файл `powershell.exe` выполнился бы под уже
+        подтверждённым пользователем UAC.
+        """
+        self.assertTrue(os.path.isabs(scheduled_task.POWERSHELL))
+        self.assertTrue(
+            scheduled_task.POWERSHELL.lower().endswith(
+                "system32\\windowspowershell\\v1.0\\powershell.exe"
+            ),
+            scheduled_task.POWERSHELL,
+        )
 
     def test_absent_task_reads_as_disabled(self) -> None:
         with mock.patch.object(scheduled_task, "is_supported", return_value=True), \
@@ -334,39 +350,37 @@ class ErrorReportTests(unittest.TestCase):
 
 
 class CurrentUserTests(unittest.TestCase):
-    def test_computer_name_is_the_area(self) -> None:
+    """Регистрация задачи идёт от SID, а не от составного имени.
+
+    Неправильная область отвечает 0x80070534 — «нет сопоставления имени с
+    SID». Составное имя `КОМПЬЮТЕР\\пользователь` подходит только вне домена:
+    на доменной машине с доменным входом оно ищется лишь в локальной SAM.
+    """
+
+    SID = "S-1-5-21-2052111302-1275210071-1801674531-1105"
+
+    def test_user_is_the_sid(self) -> None:
         with mock.patch.dict(
             "os.environ",
             {"COMPUTERNAME": "DESKTOP-P1097DP", "USERNAME": "venchwork"},
             clear=True,
-        ):
-            self.assertEqual(
-                "DESKTOP-P1097DP\\venchwork", scheduled_task.current_user()
-            )
-
-    def test_workgroup_is_never_used_as_the_area(self) -> None:
-        """Живая проверка: рабочая группа не сопоставляется с учётной записью.
-
-        На машине вне домена Windows кладёт в USERDOMAIN имя рабочей группы, и
-        регистрация задачи отвечала 0x80070534 — «нет сопоставления имени с
-        SID».
-        """
-        with mock.patch.dict(
-            "os.environ",
-            {
-                "USERDOMAIN": "WORKGROUP",
-                "COMPUTERNAME": "DESKTOP-P1097DP",
-                "USERNAME": "venchwork",
-            },
-            clear=True,
+        ), mock.patch.object(
+            scheduled_task, "current_user_sid", return_value=self.SID
         ):
             user = scheduled_task.current_user()
-        self.assertNotIn("WORKGROUP", user)
-        self.assertEqual("DESKTOP-P1097DP\\venchwork", user)
+        self.assertEqual(self.SID, user)
+        self.assertNotIn("DESKTOP-P1097DP", user)
 
-    def test_name_without_computer_is_enough(self) -> None:
-        with mock.patch.dict("os.environ", {"USERNAME": "user"}, clear=True):
-            self.assertEqual("user", scheduled_task.current_user())
+    def test_registration_script_gets_the_sid(self) -> None:
+        with mock.patch.object(scheduled_task, "is_supported", return_value=True), \
+                mock.patch.object(
+                    scheduled_task, "current_user_sid", return_value=self.SID
+                ), \
+                mock.patch.object(scheduled_task, "_run_elevated") as elevated:
+            scheduled_task.enable('"app.exe" --tray', "Ven4ControlTest")
+
+        script = decoded(elevated.call_args.args[0])
+        self.assertIn(f"New-ScheduledTaskPrincipal -UserId '{self.SID}'", script)
 
 
 if __name__ == "__main__":

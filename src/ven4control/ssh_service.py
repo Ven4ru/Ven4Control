@@ -8,8 +8,14 @@ from pathlib import Path
 
 import asyncssh
 
+from .host_key import NO_CREDENTIALS, HostKeyPin, pinned_options
 from .models import Device
-from .windows_identity import current_user_principal
+from .windows_identity import current_user_sid, system32_path
+
+
+# Только абсолютный путь: icacls защищает приватный ключ приложения, и имя без
+# пути Windows ищет в том числе в рабочем каталоге процесса.
+ICACLS = system32_path("icacls.exe")
 
 
 def tcp_check(host: str, port: int, timeout: float = 2.5) -> tuple[bool, str]:
@@ -30,14 +36,25 @@ def ensure_app_key(private_path: Path) -> tuple[Path, Path]:
     ключа нет, а потерянный публичный ключ восстанавливается из приватного.
     """
     public_path = private_path.with_suffix(".pub")
-    if not private_path.exists():
+    created = not private_path.exists()
+    if created:
         private_path.parent.mkdir(parents=True, exist_ok=True)
         key = asyncssh.generate_private_key("ssh-ed25519")
         private_path.write_bytes(key.export_private_key("openssh"))
         public_path.write_bytes(key.export_public_key("openssh"))
     elif not public_path.exists():
         restore_public_key(private_path, public_path)
-    secure_private_key_permissions(private_path)
+    try:
+        secure_private_key_permissions(private_path)
+    except (OSError, RuntimeError):
+        # Ключ пишется на диск раньше, чем к нему применяются права: только
+        # что созданный и оставшийся без ACL файл нужно убрать, чтобы
+        # следующий запуск начал с чистого листа. Существующий ключ не
+        # трогаем ни при каких условиях — он уже в authorized_keys устройств.
+        if created:
+            private_path.unlink(missing_ok=True)
+            public_path.unlink(missing_ok=True)
+        raise
     return private_path, public_path
 
 
@@ -55,9 +72,9 @@ def secure_private_key_permissions(private_path: Path) -> None:
     if os.name != "nt":
         private_path.chmod(0o600)
         return
-    if not os.environ.get("USERNAME"):
-        raise RuntimeError("Не удалось определить текущего пользователя Windows")
-    principal = current_user_principal()
+    # `icacls` понимает SID только в форме со звёздочкой: голый `S-1-5-…` он
+    # пробует сопоставить как имя учётной записи и отвечает отказом.
+    principal = f"*{current_user_sid()}"
     result = _apply_windows_private_key_acl(private_path, principal)
     if result.returncode == 0:
         return
@@ -92,7 +109,7 @@ def _apply_windows_private_key_acl(
     try:
         return subprocess.run(
             [
-                "icacls",
+                ICACLS,
                 str(private_path),
                 "/inheritance:r",
                 "/grant:r",
@@ -121,17 +138,22 @@ async def install_public_key(
     expected_fingerprint: str,
 ) -> str:
     public_key = public_key_path.read_text(encoding="utf-8").strip()
-    async with asyncssh.connect(
-        device.host,
-        port=device.port,
-        username=device.username,
-        password=password,
-        known_hosts=None,
-        login_timeout=10,
-    ) as connection:
-        actual_fingerprint = connection.get_server_host_key().get_fingerprint("sha256")
-        if actual_fingerprint != expected_fingerprint:
-            raise RuntimeError("SSH fingerprint изменился между проверкой и установкой ключа")
+    try:
+        connection = await asyncssh.connect(
+            device.host,
+            port=device.port,
+            username=device.username,
+            password=password,
+            login_timeout=10,
+            **pinned_options(HostKeyPin(expected_fingerprint)),
+        )
+    except asyncssh.HostKeyNotVerifiable as error:
+        # Отпечаток сверяется при обмене ключами: пароль до подменённого
+        # устройства не доходит.
+        raise RuntimeError(
+            "SSH fingerprint изменился между проверкой и установкой ключа"
+        ) from error
+    async with connection:
         probe = await connection.run(
             "if [ -f /etc/openwrt_release ]; then echo openwrt; "
             "elif [ \"$(uname -s)\" = Linux ]; then echo linux; else echo unknown; fi",
@@ -161,20 +183,29 @@ async def install_public_key(
     return system
 
 
-async def probe_device(device: Device, password: str) -> tuple[str, str]:
-    async with asyncssh.connect(
-        device.host,
-        port=device.port,
-        username=device.username,
-        password=password,
-        known_hosts=None,
-        login_timeout=10,
-    ) as connection:
-        key = connection.get_server_host_key()
-        fingerprint = key.get_fingerprint("sha256")
-        probe = await connection.run(
-            "if [ -f /etc/openwrt_release ]; then echo openwrt; "
-            "elif [ \"$(uname -s)\" = Linux ]; then echo linux; else echo unknown; fi",
-            check=True,
-        )
-        return probe.stdout.strip(), fingerprint
+async def probe_device(device: Device) -> str:
+    """Отпечаток ключа устройства для подтверждения пользователем.
+
+    Единственное место, где ключ устройства ещё не известен, поэтому и
+    единственное, где он принимается любой. Пароль здесь не нужен и не
+    отправляется: отпечаток сервер сообщает при обмене ключами, до
+    аутентификации. Тип устройства определяется уже после подтверждения
+    отпечатка — в `install_public_key`, внутри проверенного соединения.
+    """
+    pin = HostKeyPin()
+    try:
+        async with asyncssh.connect(
+            device.host,
+            port=device.port,
+            username=device.username,
+            login_timeout=10,
+            **pinned_options(pin),
+            **NO_CREDENTIALS,
+        ):
+            pass
+    except asyncssh.PermissionDenied:
+        # Ожидаемо: предъявлять серверу нечего. Отпечаток уже получен.
+        pass
+    if not pin.fingerprint:
+        raise RuntimeError("Устройство не сообщило SSH fingerprint")
+    return pin.fingerprint
