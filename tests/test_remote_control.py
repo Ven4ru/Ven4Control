@@ -86,6 +86,20 @@ def openwrt_connection(*extra: tuple[str, str, int]) -> FakeConnection:
     )
 
 
+# Подстрока команды-пробы «какой менеджер пакетов стоит на устройстве».
+# Только у неё есть `then echo apk`: сами команды поиска после фикса
+# однобранчевые и слова `command -v` не содержат вовсе.
+PACKAGE_MANAGER_PROBE = "then echo apk"
+
+
+def openwrt_search_connection(
+    manager: str,
+    *extra: tuple[str, str, int],
+) -> FakeConnection:
+    """openwrt-соединение, где проба менеджера пакетов отвечает `manager`."""
+    return openwrt_connection((PACKAGE_MANAGER_PROBE, f"{manager}\n", 0), *extra)
+
+
 class DetectPlatformTests(unittest.TestCase):
     def test_powershell_device_is_detected_as_windows(self) -> None:
         connection = windows_connection()
@@ -578,29 +592,143 @@ class WingetSearchParsingTests(unittest.TestCase):
         self.assertEqual(["cURL.cURL", "Orange-OpenSource.Hurl"], [r.name for r in results])
         self.assertEqual("Hurl · 8.0.1", results[1].description)
 
+    def test_table_without_the_match_column_is_still_parsed(self) -> None:
+        # Живая находка: столбец Match winget печатает ТОЛЬКО когда совпадение
+        # найдено не по имени пакета (по тегу). Обычный поиск по имени этого
+        # столбца не имеет вовсе — требовать его обязательным значило показать
+        # пользователю «Ничего не найдено» при непустом ответе winget.
+        output = (
+            "Name       Id                     Version      Source\n"
+            "------------------------------------------------------\n"
+            "Hurl       Orange-OpenSource.Hurl 8.0.1        winget\n"
+        )
+        results = parse_winget_search(output)
+        self.assertEqual(["Orange-OpenSource.Hurl"], [r.name for r in results])
+        self.assertEqual("Hurl · 8.0.1", results[0].description)
+
+    def test_localised_headers_are_parsed(self) -> None:
+        # Живая проверка на этой машине (Windows 11, ru-RU, winget v1.29.290):
+        # заголовки таблицы ЛОКАЛИЗОВАНЫ — «Имя/ИД/Версия/Источник» вместо
+        # «Name/Id/Version/Source». Ни LANG, ни LC_ALL, ни WINGET_CLI_LANGUAGE
+        # английский вывод не возвращают. Поэтому границы столбцов берутся из
+        # позиций заголовков, а не из их текста: порядок столбцов у winget
+        # фиксирован (Name, Id, Version, [Match], Source), а имена — нет.
+        output = (
+            "Имя                ИД                 Версия Источник\n"
+            "------------------------------------------------------\n"
+            "Bitvise SSH Client Bitvise.SSH.Client 9.66   winget\n"
+            "Bitvise SSH Server Bitvise.SSH.Server 9.66   winget\n"
+        )
+        results = parse_winget_search(output)
+        self.assertEqual(
+            ["Bitvise.SSH.Client", "Bitvise.SSH.Server"], [r.name for r in results]
+        )
+        # Пробел внутри Name («Bitvise SSH Client») — ещё одна причина резать
+        # по позициям: разбор по пробелам развалил бы и имя, и всю строку.
+        self.assertEqual("Bitvise SSH Client · 9.66", results[0].description)
+
+    def test_localised_headers_with_the_match_column(self) -> None:
+        # Тот же живой вывод `winget search curl` на ru-RU: Match здесь есть.
+        output = (
+            "Имя        ИД                     Версия       Совпадение Источник\n"
+            "------------------------------------------------------------------\n"
+            "cURL       cURL.cURL              8.21.0.6                winget\n"
+            "Hurl       Orange-OpenSource.Hurl 8.0.1        Tag: curl  winget\n"
+        )
+        results = parse_winget_search(output)
+        self.assertEqual(["cURL.cURL", "Orange-OpenSource.Hurl"], [r.name for r in results])
+        self.assertEqual("Hurl · 8.0.1", results[1].description)
+
+    def test_header_without_three_columns_is_an_empty_list(self) -> None:
+        # Без Id и Version таблицу разбирать нечем — пустой список честнее
+        # выдуманных имён пакетов.
+        self.assertEqual([], parse_winget_search("Name\n----\nHurl\n"))
+
 
 class SearchPackagesTests(unittest.TestCase):
     def test_apk_device_returns_parsed_results(self) -> None:
         # Маркер "apk search" — подстрока реальной команды, которую строит
         # search_packages для платформы openwrt: FakeConnection подставляет
         # ответ по вхождению маркера в отправленную строку.
-        connection = openwrt_connection(
-            ("apk search", "openssh-sftp-server-10.3_p1-r1 - OpenSSH SFTP server.\n", 0)
+        connection = openwrt_search_connection(
+            "apk",
+            ("apk search", "openssh-sftp-server-10.3_p1-r1 - OpenSSH SFTP server.\n", 0),
         )
         with patched_connect(connection):
             results = asyncio.run(search_packages(device(), {}, "sftp"))
         self.assertEqual("openssh-sftp-server", results[0].name)
         self.assertTrue(connection.closed)
 
+    def test_opkg_device_is_parsed_by_the_opkg_parser(self) -> None:
+        # Живой формат `opkg list` — "имя - версия - описание", три поля.
+        # apk-парсер на этой же строке отрезал бы от имени «версию» и положил
+        # в описание "9.6-r1": в install ушло бы несуществующее имя пакета.
+        # Менеджер определяется пробой ДО поиска, а не угадывается по
+        # платформе — на openwrt возможны и apk, и opkg.
+        connection = openwrt_search_connection(
+            "opkg",
+            ("opkg list", "openssh-sftp-server - 9.6-r1 - OpenSSH SFTP server\n", 0),
+        )
+        with patched_connect(connection):
+            results = asyncio.run(search_packages(device(), {}, "sftp"))
+        self.assertEqual(
+            [("openssh-sftp-server", "OpenSSH SFTP server")],
+            [(r.name, r.description) for r in results],
+        )
+
+    def test_command_is_single_branch_for_the_manager_that_is_there(self) -> None:
+        """После пробы команда поиска однобранчевая — без if/elif вовсе."""
+        opkg = openwrt_search_connection("opkg", ("opkg list", "", 0))
+        with patched_connect(opkg):
+            asyncio.run(search_packages(device(), {}, "sftp"))
+        executed = opkg.commands[-1]
+        self.assertIn("opkg list", executed)
+        self.assertNotIn("apk search", executed)
+        self.assertNotIn("elif", executed)
+
+        apk = openwrt_search_connection("apk", ("apk search", "", 0))
+        with patched_connect(apk):
+            asyncio.run(search_packages(device(), {}, "sftp"))
+        executed = apk.commands[-1]
+        self.assertIn("apk search", executed)
+        self.assertNotIn("opkg list", executed)
+        self.assertNotIn("elif", executed)
+
+    def test_missing_package_manager_is_reported_before_the_search(self) -> None:
+        connection = openwrt_search_connection("none")
+        with patched_connect(connection):
+            with self.assertRaises(RuntimeError) as raised:
+                asyncio.run(search_packages(device(), {}, "sftp"))
+        self.assertIn("Менеджер пакетов не найден", str(raised.exception))
+        # Проба — последняя отправленная команда: до поиска дело не дошло.
+        self.assertIn(PACKAGE_MANAGER_PROBE, connection.commands[-1])
+        self.assertTrue(connection.closed)
+
     def test_search_term_is_shell_escaped(self) -> None:
         """Защита от command injection: термин уходит одним словом в кавычках."""
-        connection = openwrt_connection(("apk search", "", 0))
+        connection = openwrt_search_connection("apk", ("apk search", "", 0))
         with patched_connect(connection):
             asyncio.run(search_packages(device(), {}, "sftp; rm -rf /"))
         executed = connection.commands[-1]
         self.assertIn("apk search -v -d 'sftp; rm -rf /'", executed)
         self.assertNotIn("apk search -v -d sftp;", executed)
-        self.assertNotIn("grep -i sftp;", executed)
+
+        opkg = openwrt_search_connection("opkg", ("opkg list", "", 0))
+        with patched_connect(opkg):
+            asyncio.run(search_packages(device(), {}, "sftp; rm -rf /"))
+        self.assertIn("grep -i 'sftp; rm -rf /'", opkg.commands[-1])
+        self.assertNotIn("grep -i sftp;", opkg.commands[-1])
+
+    def test_opkg_limit_is_applied_on_the_device(self) -> None:
+        # Обрезка через head обязана остаться на устройстве и в opkg-ветке:
+        # каталог там тоже тысячи строк, гонять их по SSH незачем.
+        connection = openwrt_search_connection(
+            "opkg", ("opkg list", "pkg-one - 1.0 - one\npkg-two - 2.0 - two\n", 0)
+        )
+        with patched_connect(connection):
+            results = asyncio.run(search_packages(device(), {}, "", limit=200))
+        self.assertEqual(["pkg-one", "pkg-two"], [r.name for r in results])
+        self.assertTrue(connection.commands[-1].rstrip().endswith("| head -n 200"))
 
     def test_empty_term_with_limit_lists_the_whole_catalog_capped(self) -> None:
         # Живая находка: apk/apt при пустом паттерне сами перечисляют весь
@@ -608,8 +736,8 @@ class SearchPackagesTests(unittest.TestCase):
         # 10983/85576 строк на реальных устройствах. limit обрезает вывод
         # НА УСТРОЙСТВЕ через head, чтобы не гонять по SSH то, что всё равно
         # будет отброшено.
-        connection = openwrt_connection(
-            ("apk search", "pkg-one - one\npkg-two - two\n", 0)
+        connection = openwrt_search_connection(
+            "apk", ("apk search", "pkg-one - one\npkg-two - two\n", 0)
         )
         with patched_connect(connection):
             results = asyncio.run(search_packages(device(), {}, "", limit=200))
