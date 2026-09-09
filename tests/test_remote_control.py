@@ -13,6 +13,7 @@ from ven4control.remote_control import (
     WINDOWS_UNSUPPORTED,
     PackageResult,
     _first_health_message,
+    _run,
     backup_configs,
     build_backup_command,
     build_log_command,
@@ -20,6 +21,7 @@ from ven4control.remote_control import (
     collect_overview,
     detect_platform,
     enable_rdp,
+    explain_command_error,
     install_package,
     install_ven4tools,
     is_rdp_enabled,
@@ -870,6 +872,60 @@ class InstallVen4ToolsTests(unittest.TestCase):
             with self.assertRaises(RuntimeError) as raised:
                 asyncio.run(install_ven4tools(device(), {}))
         self.assertIn("кодом None", str(raised.exception))
+
+
+class FailingConnection:
+    """Соединение, отвечающее заданной ошибкой на любую команду."""
+
+    def __init__(self, stderr: str, status: int = 1) -> None:
+        self.stderr = stderr
+        self.status = status
+
+    async def run(self, command: str, check: bool = False, timeout: int = 60):
+        return SimpleNamespace(stdout="", stderr=self.stderr, exit_status=self.status)
+
+
+class SudoErrorTests(unittest.TestCase):
+    """Отказ sudo объясняется по-русски, остальные ошибки не подменяются."""
+
+    SUDO_STDERRS = (
+        "sudo: a password is required",
+        "sudo: no tty present and no askpass program specified",
+        (
+            "sudo: a terminal is required to read the password; either use the "
+            "-S option to read from standard input or configure an askpass helper"
+        ),
+    )
+
+    def test_sudo_refusal_is_explained_in_russian(self) -> None:
+        for stderr in self.SUDO_STDERRS:
+            with self.subTest(stderr=stderr):
+                connection = FailingConnection(stderr)
+                with self.assertRaises(RuntimeError) as raised:
+                    asyncio.run(_run(connection, "sudo -n reboot", check=True))
+                message = str(raised.exception)
+                self.assertIn("NOPASSWD", message)
+                self.assertIn("README", message)
+                self.assertNotIn(stderr, message)
+
+    def test_other_errors_keep_the_original_text(self) -> None:
+        """Регрессия: не-sudo ошибка остаётся единственным источником причины."""
+        connection = FailingConnection("bash: apt-get: command not found")
+        with self.assertRaises(RuntimeError) as raised:
+            asyncio.run(_run(connection, "apt-get update", check=True))
+        self.assertEqual("bash: apt-get: command not found", str(raised.exception))
+
+    def test_word_sudo_alone_is_not_enough(self) -> None:
+        """Консервативность: одного упоминания sudo мало для подмены текста."""
+        detail = "sudo: /etc/sudoers is world writable"
+        self.assertEqual(detail, explain_command_error(detail))
+
+    def test_phrase_without_sudo_is_not_enough(self) -> None:
+        detail = "ssh: no tty present"
+        self.assertEqual(detail, explain_command_error(detail))
+
+    def test_empty_detail_is_unchanged(self) -> None:
+        self.assertEqual("", explain_command_error(""))
 
 
 if __name__ == "__main__":
