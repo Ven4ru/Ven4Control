@@ -592,6 +592,58 @@ class WingetSearchParsingTests(unittest.TestCase):
         self.assertEqual(["cURL.cURL", "Orange-OpenSource.Hurl"], [r.name for r in results])
         self.assertEqual("Hurl · 8.0.1", results[1].description)
 
+    def test_table_without_the_match_column_is_still_parsed(self) -> None:
+        # Живая находка: столбец Match winget печатает ТОЛЬКО когда совпадение
+        # найдено не по имени пакета (по тегу). Обычный поиск по имени этого
+        # столбца не имеет вовсе — требовать его обязательным значило показать
+        # пользователю «Ничего не найдено» при непустом ответе winget.
+        output = (
+            "Name       Id                     Version      Source\n"
+            "------------------------------------------------------\n"
+            "Hurl       Orange-OpenSource.Hurl 8.0.1        winget\n"
+        )
+        results = parse_winget_search(output)
+        self.assertEqual(["Orange-OpenSource.Hurl"], [r.name for r in results])
+        self.assertEqual("Hurl · 8.0.1", results[0].description)
+
+    def test_localised_headers_are_parsed(self) -> None:
+        # Живая проверка на этой машине (Windows 11, ru-RU, winget v1.29.290):
+        # заголовки таблицы ЛОКАЛИЗОВАНЫ — «Имя/ИД/Версия/Источник» вместо
+        # «Name/Id/Version/Source». Ни LANG, ни LC_ALL, ни WINGET_CLI_LANGUAGE
+        # английский вывод не возвращают. Поэтому границы столбцов берутся из
+        # позиций заголовков, а не из их текста: порядок столбцов у winget
+        # фиксирован (Name, Id, Version, [Match], Source), а имена — нет.
+        output = (
+            "Имя                ИД                 Версия Источник\n"
+            "------------------------------------------------------\n"
+            "Bitvise SSH Client Bitvise.SSH.Client 9.66   winget\n"
+            "Bitvise SSH Server Bitvise.SSH.Server 9.66   winget\n"
+        )
+        results = parse_winget_search(output)
+        self.assertEqual(
+            ["Bitvise.SSH.Client", "Bitvise.SSH.Server"], [r.name for r in results]
+        )
+        # Пробел внутри Name («Bitvise SSH Client») — ещё одна причина резать
+        # по позициям: разбор по пробелам развалил бы и имя, и всю строку.
+        self.assertEqual("Bitvise SSH Client · 9.66", results[0].description)
+
+    def test_localised_headers_with_the_match_column(self) -> None:
+        # Тот же живой вывод `winget search curl` на ru-RU: Match здесь есть.
+        output = (
+            "Имя        ИД                     Версия       Совпадение Источник\n"
+            "------------------------------------------------------------------\n"
+            "cURL       cURL.cURL              8.21.0.6                winget\n"
+            "Hurl       Orange-OpenSource.Hurl 8.0.1        Tag: curl  winget\n"
+        )
+        results = parse_winget_search(output)
+        self.assertEqual(["cURL.cURL", "Orange-OpenSource.Hurl"], [r.name for r in results])
+        self.assertEqual("Hurl · 8.0.1", results[1].description)
+
+    def test_header_without_three_columns_is_an_empty_list(self) -> None:
+        # Без Id и Version таблицу разбирать нечем — пустой список честнее
+        # выдуманных имён пакетов.
+        self.assertEqual([], parse_winget_search("Name\n----\nHurl\n"))
+
 
 class SearchPackagesTests(unittest.TestCase):
     def test_apk_device_returns_parsed_results(self) -> None:

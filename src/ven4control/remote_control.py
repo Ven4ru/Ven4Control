@@ -258,6 +258,22 @@ def parse_apt_search(output: str) -> list[PackageResult]:
     return results
 
 
+def _table_column_starts(header: str) -> list[int]:
+    """Позиции, с которых начинаются столбцы таблицы фиксированной ширины.
+
+    Начало столбца — непробельный символ в начале строки или сразу после
+    пробела. Имена заголовков winget пробелов внутри не содержат ни в одном
+    языке, поэтому такой разбор заголовка однозначен даже когда соседние
+    заголовки разделены ОДНИМ пробелом (живой пример на ru-RU:
+    `Версия       Совпадение Источник`).
+    """
+    return [
+        index
+        for index, char in enumerate(header)
+        if char != " " and (index == 0 or header[index - 1] == " ")
+    ]
+
+
 def parse_winget_search(output: str) -> list[PackageResult]:
     """Разбирает вывод `winget search <термин> --accept-source-agreements`.
 
@@ -272,6 +288,23 @@ def parse_winget_search(output: str) -> list[PackageResult]:
     заголовка не подвержена этой проблеме — граница столбца не зависит от
     того, сколько пробелов оказалось у конкретной строки.
 
+    Столбцы опознаются по ПОРЯДКУ, а не по тексту заголовка: Name, Id,
+    Version, затем необязательный Match и Source. Две живые причины:
+
+    1. Match winget печатает только когда совпадение найдено не по имени
+       пакета (по тегу). Обычный поиск по имени этого столбца не имеет
+       вовсе, и требование `header.index("Match")` превращало непустой
+       ответ winget в «Ничего не найдено».
+    2. Заголовки ЛОКАЛИЗОВАНЫ. Проверено живьём на Windows 11 ru-RU
+       (winget v1.29.290): печатается `Имя/ИД/Версия/Совпадение/Источник`.
+       Ни LANG, ни LC_ALL, ни WINGET_CLI_LANGUAGE английский вывод не
+       возвращают, флага локали у самой команды нет — привязка к слову «Id»
+       ломала разбор на любой неанглийской Windows целиком.
+
+    Правая граница Version — начало следующего столбца (Match, если он есть,
+    иначе Source); если столбцов ровно три, берётся конец строки. Меньше
+    трёх столбцов — разбирать нечем, пустой список.
+
     В install идёт Id (`Bitvise.SSH.Client`), не Name — тот же принцип, что
     у apk/opkg/apt: PackageResult.name — точный устанавливаемый
     идентификатор, Name+Version собираются в description для показа.
@@ -283,18 +316,16 @@ def parse_winget_search(output: str) -> list[PackageResult]:
     )
     if separator_index is None or separator_index == 0:
         return []
-    header = lines[separator_index - 1]
-    try:
-        id_start = header.index("Id")
-        version_start = header.index("Version")
-        match_start = header.index("Match")
-    except ValueError:
+    starts = _table_column_starts(lines[separator_index - 1])
+    if len(starts) < 3:
         return []
+    id_start, version_start = starts[1], starts[2]
+    version_end = starts[3] if len(starts) > 3 else None
     results: list[PackageResult] = []
     for line in lines[separator_index + 1:]:
         name = line[:id_start].strip()
         package_id = line[id_start:version_start].strip()
-        version = line[version_start:match_start].strip()
+        version = line[version_start:version_end].strip()
         if not package_id:
             continue
         results.append(PackageResult(package_id, f"{name} · {version}"))
