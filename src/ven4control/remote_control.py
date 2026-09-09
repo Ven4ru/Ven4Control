@@ -7,6 +7,7 @@ from pathlib import Path
 
 import asyncssh
 
+from ven4control.host_key import HostKeyPin, pinned_options
 from ven4control.models import Device
 from ven4control.powershell import quote as ps_quote
 
@@ -289,7 +290,6 @@ def _connection_options(
         "host": device.host,
         "port": device.port,
         "username": device.username,
-        "known_hosts": None,
         "login_timeout": 15,
     }
     password = credentials.get("password", "")
@@ -312,15 +312,16 @@ async def _connect(
             "Для управления требуется сохранённый SSH fingerprint. "
             "Переустановите ключ Ven4Control для этого устройства."
         )
-    connection = await asyncssh.connect(**_connection_options(device, credentials))
-    actual = connection.get_server_host_key().get_fingerprint("sha256")
-    if actual != device.fingerprint:
-        connection.close()
-        await connection.wait_closed()
+    options = _connection_options(device, credentials)
+    options.update(pinned_options(HostKeyPin(device.fingerprint)))
+    try:
+        return await asyncssh.connect(**options)
+    except asyncssh.HostKeyNotVerifiable as error:
+        # Проверка сработала при обмене ключами: пароль и приватный ключ
+        # устройству не отправлялись.
         raise FingerprintError(
             "SSH fingerprint устройства изменился. Управление заблокировано."
-        )
-    return connection
+        ) from error
 
 
 async def _run(

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import asyncssh
 
+from .host_key import NO_CREDENTIALS, HostKeyPin, pinned_options
 from .models import Device
 from .windows_identity import current_user_principal
 
@@ -121,17 +122,22 @@ async def install_public_key(
     expected_fingerprint: str,
 ) -> str:
     public_key = public_key_path.read_text(encoding="utf-8").strip()
-    async with asyncssh.connect(
-        device.host,
-        port=device.port,
-        username=device.username,
-        password=password,
-        known_hosts=None,
-        login_timeout=10,
-    ) as connection:
-        actual_fingerprint = connection.get_server_host_key().get_fingerprint("sha256")
-        if actual_fingerprint != expected_fingerprint:
-            raise RuntimeError("SSH fingerprint изменился между проверкой и установкой ключа")
+    try:
+        connection = await asyncssh.connect(
+            device.host,
+            port=device.port,
+            username=device.username,
+            password=password,
+            login_timeout=10,
+            **pinned_options(HostKeyPin(expected_fingerprint)),
+        )
+    except asyncssh.HostKeyNotVerifiable as error:
+        # Отпечаток сверяется при обмене ключами: пароль до подменённого
+        # устройства не доходит.
+        raise RuntimeError(
+            "SSH fingerprint изменился между проверкой и установкой ключа"
+        ) from error
+    async with connection:
         probe = await connection.run(
             "if [ -f /etc/openwrt_release ]; then echo openwrt; "
             "elif [ \"$(uname -s)\" = Linux ]; then echo linux; else echo unknown; fi",
@@ -161,20 +167,29 @@ async def install_public_key(
     return system
 
 
-async def probe_device(device: Device, password: str) -> tuple[str, str]:
-    async with asyncssh.connect(
-        device.host,
-        port=device.port,
-        username=device.username,
-        password=password,
-        known_hosts=None,
-        login_timeout=10,
-    ) as connection:
-        key = connection.get_server_host_key()
-        fingerprint = key.get_fingerprint("sha256")
-        probe = await connection.run(
-            "if [ -f /etc/openwrt_release ]; then echo openwrt; "
-            "elif [ \"$(uname -s)\" = Linux ]; then echo linux; else echo unknown; fi",
-            check=True,
-        )
-        return probe.stdout.strip(), fingerprint
+async def probe_device(device: Device) -> str:
+    """Отпечаток ключа устройства для подтверждения пользователем.
+
+    Единственное место, где ключ устройства ещё не известен, поэтому и
+    единственное, где он принимается любой. Пароль здесь не нужен и не
+    отправляется: отпечаток сервер сообщает при обмене ключами, до
+    аутентификации. Тип устройства определяется уже после подтверждения
+    отпечатка — в `install_public_key`, внутри проверенного соединения.
+    """
+    pin = HostKeyPin()
+    try:
+        async with asyncssh.connect(
+            device.host,
+            port=device.port,
+            username=device.username,
+            login_timeout=10,
+            **pinned_options(pin),
+            **NO_CREDENTIALS,
+        ):
+            pass
+    except asyncssh.PermissionDenied:
+        # Ожидаемо: предъявлять серверу нечего. Отпечаток уже получен.
+        pass
+    if not pin.fingerprint:
+        raise RuntimeError("Устройство не сообщило SSH fingerprint")
+    return pin.fingerprint

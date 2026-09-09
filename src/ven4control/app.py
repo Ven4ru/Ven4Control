@@ -812,11 +812,11 @@ class MainWindow(QMainWindow):
 
     def _install_key(self, device: Device, password: str) -> None:
         def operation():
-            return asyncio.run(probe_device(device, password))
+            return asyncio.run(probe_device(device))
 
         worker = Worker(operation)
         worker.signals.finished.connect(
-            lambda result: self._confirm_key_install(device, password, result)
+            lambda result: self._confirm_key_install(device, password, str(result))
         )
         worker.signals.failed.connect(
             lambda error: QMessageBox.warning(
@@ -827,13 +827,14 @@ class MainWindow(QMainWindow):
         self._start_worker(worker)
 
     def _confirm_key_install(
-        self, device: Device, password: str, result: tuple[str, str]
+        self, device: Device, password: str, fingerprint: str
     ) -> None:
-        system, fingerprint = result
+        # Тип устройства здесь ещё не известен: до подтверждения отпечатка
+        # приложение не отправляет устройству ни пароля, ни команд.
         answer = QMessageBox.question(
             self,
             "Подтверждение SSH fingerprint",
-            f"Тип устройства: {system}\n\nFingerprint сервера:\n{fingerprint}\n\n"
+            f"Fingerprint сервера {device.host}:\n{fingerprint}\n\n"
             "Установить публичный ключ Ven4Control?",
         )
         if answer != QMessageBox.StandardButton.Yes:
