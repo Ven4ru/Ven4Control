@@ -10,7 +10,7 @@ import asyncssh
 
 from .host_key import NO_CREDENTIALS, HostKeyPin, pinned_options
 from .models import Device
-from .windows_identity import current_user_principal, system32_path
+from .windows_identity import current_user_sid, system32_path
 
 
 # Только абсолютный путь: icacls защищает приватный ключ приложения, и имя без
@@ -36,14 +36,25 @@ def ensure_app_key(private_path: Path) -> tuple[Path, Path]:
     ключа нет, а потерянный публичный ключ восстанавливается из приватного.
     """
     public_path = private_path.with_suffix(".pub")
-    if not private_path.exists():
+    created = not private_path.exists()
+    if created:
         private_path.parent.mkdir(parents=True, exist_ok=True)
         key = asyncssh.generate_private_key("ssh-ed25519")
         private_path.write_bytes(key.export_private_key("openssh"))
         public_path.write_bytes(key.export_public_key("openssh"))
     elif not public_path.exists():
         restore_public_key(private_path, public_path)
-    secure_private_key_permissions(private_path)
+    try:
+        secure_private_key_permissions(private_path)
+    except (OSError, RuntimeError):
+        # Ключ пишется на диск раньше, чем к нему применяются права: только
+        # что созданный и оставшийся без ACL файл нужно убрать, чтобы
+        # следующий запуск начал с чистого листа. Существующий ключ не
+        # трогаем ни при каких условиях — он уже в authorized_keys устройств.
+        if created:
+            private_path.unlink(missing_ok=True)
+            public_path.unlink(missing_ok=True)
+        raise
     return private_path, public_path
 
 
@@ -61,9 +72,9 @@ def secure_private_key_permissions(private_path: Path) -> None:
     if os.name != "nt":
         private_path.chmod(0o600)
         return
-    if not os.environ.get("USERNAME"):
-        raise RuntimeError("Не удалось определить текущего пользователя Windows")
-    principal = current_user_principal()
+    # `icacls` понимает SID только в форме со звёздочкой: голый `S-1-5-…` он
+    # пробует сопоставить как имя учётной записи и отвечает отказом.
+    principal = f"*{current_user_sid()}"
     result = _apply_windows_private_key_acl(private_path, principal)
     if result.returncode == 0:
         return

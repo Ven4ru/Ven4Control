@@ -18,7 +18,7 @@ from pathlib import Path
 
 from ven4control import autostart
 from ven4control.powershell import quote as _quoted
-from ven4control.windows_identity import current_user_principal, system32_path
+from ven4control.windows_identity import current_user_sid, system32_path
 
 
 TASK_NAME = "Ven4Control-Background"
@@ -59,12 +59,13 @@ def _require_windows() -> None:
 
 
 def current_user() -> str:
-    """Имя текущего пользователя в виде, понятном планировщику.
+    """Текущий пользователь в виде, понятном планировщику.
 
     Регистрация задачи от неправильной области отвечает 0x80070534 — «нет
-    сопоставления имени с SID». См. `windows_identity.current_user_principal`.
+    сопоставления имени с SID». `New-ScheduledTaskPrincipal -UserId` принимает
+    SID напрямую. См. `windows_identity.current_user_sid`.
     """
-    return current_user_principal()
+    return current_user_sid()
 
 
 def split_command(command: str) -> tuple[str, str]:

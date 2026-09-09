@@ -284,7 +284,23 @@ class MainWindow(QMainWindow):
         self.resize(980, 600)
         self.storage = DeviceStorage(DB_PATH)
         self.credentials = CredentialStore()
-        self.private_key, self.public_key = ensure_app_key(APP_KEY_PATH)
+        # Ключ приложения не должен ронять запуск: если ACL не применились
+        # (например, учётная запись не сопоставилась с SID), недозащищённый
+        # ключ уже удалён, а окно открывается — устройствами с паролем и с
+        # чужим ключом пользоваться по-прежнему можно.
+        self.private_key, self.public_key = APP_KEY_PATH, APP_KEY_PATH.with_suffix(
+            ".pub"
+        )
+        try:
+            self.private_key, self.public_key = ensure_app_key(APP_KEY_PATH)
+        except Exception as error:
+            QMessageBox.critical(
+                self,
+                "Ключ приложения не создан",
+                f"Не удалось подготовить SSH-ключ Ven4Control:\n{error}\n\n"
+                "Установка ключа на устройства будет недоступна, остальное "
+                "работает как обычно.",
+            )
         self.devices: list[Device] = []
         # Реестр сессий живёт на уровне приложения: закрытие окна и диалогов
         # не должно прерывать фоновое логирование.
