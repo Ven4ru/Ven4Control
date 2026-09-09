@@ -1,14 +1,78 @@
+import asyncio
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 import asyncssh
 
-from ven4control.ssh_service import ensure_app_key, secure_private_key_permissions
+from ven4control.models import Device
+from ven4control.ssh_service import (
+    ensure_app_key,
+    probe_fingerprints,
+    secure_private_key_permissions,
+)
 from ven4control.windows_identity import current_user_sid, system32_path
+
+
+class ProbeFingerprintsTests(unittest.TestCase):
+    """Массовый опрос отпечатков для импорта из Tailscale."""
+
+    def _devices(self, *hosts: str) -> list[Device]:
+        return [Device(None, host, host, 22, "user") for host in hosts]
+
+    def test_every_device_gets_its_own_fingerprint(self) -> None:
+        async def probe(device: Device) -> str:
+            return f"SHA256:{device.host}"
+
+        with mock.patch("ven4control.ssh_service.probe_device", probe):
+            result = asyncio.run(probe_fingerprints(self._devices("a", "b")))
+        self.assertEqual(["SHA256:a", "SHA256:b"], result)
+
+    def test_unreachable_device_does_not_break_the_others(self) -> None:
+        async def probe(device: Device) -> str:
+            if device.host == "b":
+                raise OSError("хост недоступен")
+            return f"SHA256:{device.host}"
+
+        with mock.patch("ven4control.ssh_service.probe_device", probe):
+            result = asyncio.run(probe_fingerprints(self._devices("a", "b", "c")))
+        self.assertEqual(["SHA256:a", "", "SHA256:c"], result)
+
+    def test_silent_device_is_cut_off_by_the_timeout(self) -> None:
+        """Офлайн-пир не должен держать импорт до полного таймаута входа."""
+
+        async def probe(device: Device) -> str:
+            if device.host == "b":
+                await asyncio.sleep(5)
+            return f"SHA256:{device.host}"
+
+        with mock.patch("ven4control.ssh_service.probe_device", probe):
+            result = asyncio.run(
+                probe_fingerprints(self._devices("a", "b"), timeout=0.05)
+            )
+        self.assertEqual(["SHA256:a", ""], result)
+
+    def test_devices_are_probed_at_the_same_time(self) -> None:
+        """Последовательный обход ждал бы таймаут на каждом офлайн-пире."""
+
+        async def probe(device: Device) -> str:
+            await asyncio.sleep(0.1)
+            return f"SHA256:{device.host}"
+
+        started = time.perf_counter()
+        with mock.patch("ven4control.ssh_service.probe_device", probe):
+            asyncio.run(
+                probe_fingerprints(self._devices("a", "b", "c", "d"), timeout=5)
+            )
+        # Последовательно четыре опроса заняли бы не меньше 0.4 с.
+        self.assertLess(time.perf_counter() - started, 0.3)
+
+    def test_empty_list_asks_nothing(self) -> None:
+        self.assertEqual([], asyncio.run(probe_fingerprints([])))
 
 
 class ApplicationKeyTests(unittest.TestCase):

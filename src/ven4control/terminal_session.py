@@ -25,7 +25,7 @@ from PySide6.QtCore import QObject, Signal
 
 from ven4control.ansi_screen import DEFAULT_COLUMNS, DEFAULT_ROWS, normalize_size
 from ven4control.models import Device
-from ven4control.remote_control import _connect
+from ven4control.remote_control import MISSING_FINGERPRINT_MESSAGE, _connect
 
 
 TERM_TYPE = "xterm-256color"
@@ -140,10 +140,7 @@ class TerminalSession(QObject):
         if self._future is not None:
             return
         if not self.device.fingerprint:
-            raise ValueError(
-                "Для устройства не сохранён SSH fingerprint. "
-                "Переустановите ключ Ven4Control и повторите."
-            )
+            raise ValueError(MISSING_FINGERPRINT_MESSAGE)
         loop = self._ensure_loop()
         self._set_status(STATUS_CONNECTING)
         self._future = asyncio.run_coroutine_threadsafe(self._run(), loop)

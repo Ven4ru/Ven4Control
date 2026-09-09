@@ -25,7 +25,7 @@ import asyncssh
 from PySide6.QtCore import QObject, Signal
 
 from ven4control.models import Device
-from ven4control.remote_control import _connect
+from ven4control.remote_control import MISSING_FINGERPRINT_MESSAGE, _connect
 
 
 # Начальная папка листинга: SFTP разворачивает точку в домашнюю папку
@@ -332,10 +332,7 @@ class SftpSession(QObject):
         if self._started:
             return
         if not self.device.fingerprint:
-            raise ValueError(
-                "Для устройства не сохранён SSH fingerprint. "
-                "Переустановите ключ Ven4Control и повторите."
-            )
+            raise ValueError(MISSING_FINGERPRINT_MESSAGE)
         self._started = True
         loop = self._ensure_loop()
         self._set_status(STATUS_CONNECTING)

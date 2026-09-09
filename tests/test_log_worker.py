@@ -7,6 +7,7 @@ from ven4control.log_worker import (
     STATUS_FAILED,
     STATUS_STOPPED,
     LogStreamWorker,
+    UnsupportedPlatformError,
     build_stream_command,
     connected_marker,
     disconnected_marker,
@@ -18,7 +19,7 @@ from ven4control.log_worker import (
     status_label,
 )
 from ven4control.models import Device
-from ven4control.remote_control import FingerprintError
+from ven4control.remote_control import WINDOWS_UNSUPPORTED, FingerprintError
 
 
 SNAPSHOT_OUTPUT = (
@@ -66,6 +67,12 @@ class StreamCommandTests(unittest.TestCase):
                     command = build_stream_command(platform, source)
                     self.assertIn("logread", command)
                     self.assertIn("journalctl", command)
+
+    def test_windows_has_no_journal_command(self) -> None:
+        """Команда журнала на PowerShell завершилась бы сразу же, изображая обрыв."""
+        with self.assertRaises(UnsupportedPlatformError) as raised:
+            build_stream_command("windows")
+        self.assertEqual(WINDOWS_UNSUPPORTED, str(raised.exception))
 
     def test_stream_never_limits_history(self) -> None:
         """У стрима не должно быть `tail -n`: он читает новые записи."""
@@ -183,6 +190,13 @@ class FakeConnection:
 
     async def run(self, command: str, check: bool = False, timeout: int = 60):
         self.commands.append(command)
+        if "$PSVersionTable" in command:
+            if self.platform == "windows":
+                return SimpleNamespace(
+                    stdout="windows\nWindows 11 Pro\n", stderr="", exit_status=0
+                )
+            # POSIX-оболочка не разбирает пробу PowerShell.
+            return SimpleNamespace(stdout="", stderr="", exit_status=2)
         if "openwrt_release" in command:
             return SimpleNamespace(
                 stdout=f"{self.platform}\nТестовая система\n", stderr="", exit_status=0
@@ -309,6 +323,28 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(STATUS_FAILED, worker.status)
         self.assertEqual(1, len(attempts))
         self.assertIn("fingerprint", "\n".join(writer.lines))
+
+    async def test_windows_device_stops_the_session_instead_of_reconnecting(
+        self,
+    ) -> None:
+        """Иначе сессия вечно дописывала бы «ОТКЛЮЧЕНО» в файл журнала.
+
+        Пустой поток PowerShell неотличим от обрыва связи, поэтому без
+        явного отказа воркер уходил в бесконечный цикл переподключений.
+        """
+        writer = FakeWriter()
+        connection = FakeConnection(platform="windows")
+        connect, attempts = connect_sequence([connection])
+        worker = self._worker(writer, connect)
+
+        await asyncio.wait_for(worker.run(), 5)
+
+        self.assertEqual(STATUS_FAILED, worker.status)
+        self.assertEqual(1, len(attempts))
+        body = "\n".join(writer.lines)
+        self.assertIn(WINDOWS_UNSUPPORTED, body)
+        self.assertNotIn("ОТКЛЮЧЕНО", body)
+        self.assertTrue(connection.closed)
 
     async def test_snapshot_is_written_periodically(self) -> None:
         writer = FakeWriter()

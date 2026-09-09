@@ -111,6 +111,22 @@ RDP_ENABLE_COMMAND = (
 )
 
 
+# Отказ операций, у которых есть только POSIX-реализация. Windows-аналоги —
+# отдельная работа; до неё пользователь должен получать объяснение, а не
+# «systemctl не является внутренней или внешней командой» от PowerShell.
+WINDOWS_UNSUPPORTED = "Операция недоступна для Windows-устройств."
+
+
+# Единственный оставшийся способ остаться без fingerprint — ответить «Нет»
+# на подтверждение при добавлении устройства: сам отпечаток запрашивается и
+# сохраняется до и независимо от установки ключа. Совет «переустановите ключ»
+# был неисполним — пути переустановки в интерфейсе нет.
+MISSING_FINGERPRINT_MESSAGE = (
+    "Fingerprint не был подтверждён при добавлении устройства. "
+    "Удалите устройство и добавьте заново, подтвердив fingerprint."
+)
+
+
 class FingerprintError(RuntimeError):
     """SSH fingerprint не сохранён или не совпадает с записанным ранее.
 
@@ -308,10 +324,7 @@ async def _connect(
     credentials: dict[str, str],
 ) -> asyncssh.SSHClientConnection:
     if not device.fingerprint:
-        raise FingerprintError(
-            "Для управления требуется сохранённый SSH fingerprint. "
-            "Переустановите ключ Ven4Control для этого устройства."
-        )
+        raise FingerprintError(MISSING_FINGERPRINT_MESSAGE)
     options = _connection_options(device, credentials)
     options.update(pinned_options(HostKeyPin(device.fingerprint)))
     try:
@@ -392,6 +405,21 @@ async def _require_windows(
             f"RDP есть только у Windows, устройство определено как "
             f"{description} ({platform})."
         )
+    return platform, description
+
+
+async def _reject_windows(
+    connection: asyncssh.SSHClientConnection,
+) -> tuple[str, str]:
+    """Платформа устройства; для Windows — честный отказ вместо мусора.
+
+    Зеркало `_require_windows`: там операция есть только у Windows, здесь —
+    только у POSIX-систем. Проба платформы стоит одну короткую команду и
+    дешевле, чем разбор невнятной ошибки PowerShell пользователем.
+    """
+    platform, description = await detect_platform(connection)
+    if platform == "windows":
+        raise RuntimeError(WINDOWS_UNSUPPORTED)
     return platform, description
 
 
@@ -483,7 +511,7 @@ async def collect_overview(
 ) -> SystemOverview:
     connection = await _connect(device, credentials)
     try:
-        platform, description = await detect_platform(connection)
+        platform, description = await _reject_windows(connection)
         metrics = await _run(
             connection,
             METRICS_COMMAND,
@@ -590,7 +618,7 @@ async def list_services(
 ) -> tuple[str, list[ServiceInfo]]:
     connection = await _connect(device, credentials)
     try:
-        platform, _ = await detect_platform(connection)
+        platform, _ = await _reject_windows(connection)
         if platform == "openwrt":
             result = await _run(connection, "ubus call service list", check=True)
             data = json.loads(result.stdout)
@@ -650,6 +678,7 @@ async def read_logs(
     command = build_log_command(source, lines)
     connection = await _connect(device, credentials)
     try:
+        await _reject_windows(connection)
         result = await _run(connection, command, timeout=30, check=True)
         output = result.stdout.strip()
         return output or "Записей не найдено."
@@ -667,7 +696,7 @@ async def restart_service(
         raise ValueError("Недопустимое имя сервиса")
     connection = await _connect(device, credentials)
     try:
-        platform, _ = await detect_platform(connection)
+        platform, _ = await _reject_windows(connection)
         if platform == "openwrt":
             command = (
                 f"if [ -x /etc/init.d/{service} ]; then /etc/init.d/{service} restart; "
@@ -688,7 +717,7 @@ async def reboot_device(
 ) -> str:
     connection = await _connect(device, credentials)
     try:
-        platform, _ = await detect_platform(connection)
+        platform, _ = await _reject_windows(connection)
         command = (
             "nohup sh -c 'sleep 2; reboot' >/dev/null 2>&1 &"
             if platform == "openwrt"
@@ -707,7 +736,7 @@ async def update_packages(
 ) -> str:
     connection = await _connect(device, credentials)
     try:
-        platform, _ = await detect_platform(connection)
+        platform, _ = await _reject_windows(connection)
         if platform == "openwrt":
             command = (
                 "if command -v apk >/dev/null 2>&1; then apk update && apk upgrade; "
@@ -870,6 +899,20 @@ async def install_ven4tools(device: Device, credentials: dict[str, str]) -> str:
             "if (-not $asset) { throw 'В последнем релизе Ven4Tools нет ZIP-архива.' }; "
             '$zipPath = "$env:TEMP\\ven4tools-update.zip"; '
             "Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath; "
+            # Целостность сверяется до распаковки: иначе на устройстве
+            # выполнился бы посторонний код, который никто не проверял.
+            # Хеш уже лежит в ответе GitHub API рядом со ссылкой на
+            # архив (поле digest вида «sha256:<hex>»), отдельный запрос
+            # за ним не нужен. Регистр hex не гарантирован ни одной из
+            # сторон, поэтому сравнение приводится к нижнему.
+            "$expected = ($asset.digest -replace '^sha256:', ''); "
+            "if (-not $expected) { Remove-Item $zipPath -Force; "
+            "throw 'Релиз не содержит контрольной суммы — установка отменена.' }; "
+            "$actual = (Get-FileHash -Algorithm SHA256 -Path $zipPath).Hash; "
+            "if ($actual.ToLower() -ne $expected.ToLower()) { "
+            "Remove-Item $zipPath -Force; "
+            "throw 'Проверка целостности скачанного архива не пройдена — "
+            "установка отменена.' }; "
             f"Expand-Archive -Path $zipPath -DestinationPath {ps_quote(VEN4TOOLS_INSTALL_PATH)} -Force; "
             "Remove-Item $zipPath -Force; "
             f"Set-Content -Path {ps_quote(VEN4TOOLS_VERSION_MARKER)} -Value $release.tag_name -NoNewline; "
@@ -987,6 +1030,8 @@ def build_backup_command(platform: str, remote_path: str) -> str:
     Прошлый вариант использовал `set -e` вместе с `[ -e "$p" ] && ...`:
     первый же отсутствующий путь завершал оболочку, и копия не создавалась.
     """
+    if platform == "windows":
+        raise RuntimeError(WINDOWS_UNSUPPORTED)
     if platform == "openwrt":
         return f"sysupgrade -b {remote_path}"
     return (
@@ -1008,7 +1053,7 @@ async def backup_configs(
     remote_path = ""
     local_path: Path | None = None
     try:
-        platform, _ = await detect_platform(connection)
+        platform, _ = await _reject_windows(connection)
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", device.name).strip("_") or "device"
         destination.mkdir(parents=True, exist_ok=True)

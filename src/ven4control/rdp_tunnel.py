@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from PySide6.QtCore import QObject, Signal
 
 from ven4control.models import Device
-from ven4control.remote_control import _connect
+from ven4control.remote_control import MISSING_FINGERPRINT_MESSAGE, _connect
 
 
 # Локальный конец туннеля. Слушаем только петлевой интерфейс: сессия должна
@@ -148,10 +148,7 @@ class RdpTunnelManager(QObject):
         if device.id is None:
             raise ValueError("Устройство не сохранено, туннель открывать нечего.")
         if not device.fingerprint:
-            raise ValueError(
-                "Для устройства не сохранён SSH fingerprint. "
-                "Переустановите ключ Ven4Control и повторите."
-            )
+            raise ValueError(MISSING_FINGERPRINT_MESSAGE)
         with self._lock:
             existing = self._tunnels.get(device.id)
             if existing is not None:
