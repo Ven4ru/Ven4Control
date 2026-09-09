@@ -18,7 +18,7 @@ from pathlib import Path
 
 from ven4control import autostart
 from ven4control.powershell import quote as _quoted
-from ven4control.windows_identity import current_user_principal
+from ven4control.windows_identity import current_user_principal, system32_path
 
 
 TASK_NAME = "Ven4Control-Background"
@@ -38,7 +38,9 @@ SETTINGS_OPTIONS = (
     "-AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable"
 )
 
-POWERSHELL = "powershell.exe"
+# Только абсолютный путь: PowerShell запускается с правами администратора,
+# а имя без пути Windows ищет в том числе в рабочем каталоге процесса.
+POWERSHELL = system32_path("WindowsPowerShell", "v1.0", "powershell.exe")
 
 STATE_TIMEOUT = 30
 ELEVATED_TIMEOUT_MS = 120_000

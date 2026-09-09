@@ -118,6 +118,26 @@ class PrivateKeyPermissionsTests(unittest.TestCase):
         self.assertNotIn("WORKGROUP", principal_argument)
         self.assertEqual("DESKTOP-P1097DP\\venchwork:(F)", principal_argument)
 
+    def test_icacls_is_taken_from_system32(self) -> None:
+        """Имя без пути Windows ищет и в рабочем каталоге процесса."""
+        captured: dict[str, list[str]] = {}
+
+        def fake_run(args, **kwargs):
+            captured["args"] = args
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        with mock.patch("ven4control.ssh_service.subprocess.run", side_effect=fake_run):
+            with tempfile.TemporaryDirectory() as directory:
+                private_key = Path(directory) / "id_ed25519"
+                private_key.write_bytes(b"private-key-test-data")
+                secure_private_key_permissions(private_key)
+
+        executable = captured["args"][0]
+        self.assertTrue(os.path.isabs(executable), executable)
+        self.assertTrue(
+            executable.lower().endswith("system32\\icacls.exe"), executable
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

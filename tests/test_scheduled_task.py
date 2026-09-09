@@ -1,4 +1,5 @@
 import base64
+import os
 import re
 import subprocess
 import unittest
@@ -155,6 +156,21 @@ class IsEnabledTests(unittest.TestCase):
         self.assertIn("Get-ScheduledTask -TaskName 'Ven4ControlTest'", script)
         # Проверка состояния делается без прав администратора.
         self.assertNotIn("runas", script)
+
+    def test_powershell_is_taken_from_system32(self) -> None:
+        """Имя без пути Windows ищет и в рабочем каталоге процесса.
+
+        Задача регистрируется с правами администратора, поэтому подложенный
+        рядом с `Ven4Control.exe` файл `powershell.exe` выполнился бы под уже
+        подтверждённым пользователем UAC.
+        """
+        self.assertTrue(os.path.isabs(scheduled_task.POWERSHELL))
+        self.assertTrue(
+            scheduled_task.POWERSHELL.lower().endswith(
+                "system32\\windowspowershell\\v1.0\\powershell.exe"
+            ),
+            scheduled_task.POWERSHELL,
+        )
 
     def test_absent_task_reads_as_disabled(self) -> None:
         with mock.patch.object(scheduled_task, "is_supported", return_value=True), \

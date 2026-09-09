@@ -10,7 +10,12 @@ import asyncssh
 
 from .host_key import NO_CREDENTIALS, HostKeyPin, pinned_options
 from .models import Device
-from .windows_identity import current_user_principal
+from .windows_identity import current_user_principal, system32_path
+
+
+# Только абсолютный путь: icacls защищает приватный ключ приложения, и имя без
+# пути Windows ищет в том числе в рабочем каталоге процесса.
+ICACLS = system32_path("icacls.exe")
 
 
 def tcp_check(host: str, port: int, timeout: float = 2.5) -> tuple[bool, str]:
@@ -93,7 +98,7 @@ def _apply_windows_private_key_acl(
     try:
         return subprocess.run(
             [
-                "icacls",
+                ICACLS,
                 str(private_path),
                 "/inheritance:r",
                 "/grant:r",
