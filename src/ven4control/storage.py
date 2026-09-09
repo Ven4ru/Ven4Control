@@ -25,6 +25,14 @@ DEVICE_COLUMNS: tuple[tuple[str, str], ...] = (
 )
 
 
+class StorageError(RuntimeError):
+    """Ошибка базы устройств с готовым объяснением для пользователя.
+
+    Текст показывается как есть в окне «Ven4Control не запустился», поэтому
+    он написан по-русски и называет конкретный файл.
+    """
+
+
 class DeviceStorage:
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -37,6 +45,23 @@ class DeviceStorage:
         return connection
 
     def _initialize(self) -> None:
+        try:
+            self._create_schema()
+        except sqlite3.OperationalError:
+            # Файл занят, недоступен по правам или папка исчезла — это не
+            # повреждение, и текст sqlite здесь единственный источник причины.
+            raise
+        except sqlite3.DatabaseError as error:
+            # Файл существует, но это не база SQLite (или она разрушена):
+            # сырое «file is not a database» не говорит новичку ничего.
+            raise StorageError(
+                f"База устройств повреждена: {self.path}\n\n"
+                "Переименуйте или удалите этот файл — при следующем запуске "
+                "Ven4Control создаст новую пустую базу. Список устройств "
+                "придётся добавить заново."
+            ) from error
+
+    def _create_schema(self) -> None:
         with closing(self._connect()) as db:
             db.execute(
                 """
