@@ -111,6 +111,16 @@ RDP_ENABLE_COMMAND = (
 )
 
 
+# Единственный оставшийся способ остаться без fingerprint — ответить «Нет»
+# на подтверждение при добавлении устройства: сам отпечаток запрашивается и
+# сохраняется до и независимо от установки ключа. Совет «переустановите ключ»
+# был неисполним — пути переустановки в интерфейсе нет.
+MISSING_FINGERPRINT_MESSAGE = (
+    "Fingerprint не был подтверждён при добавлении устройства. "
+    "Удалите устройство и добавьте заново, подтвердив fingerprint."
+)
+
+
 class FingerprintError(RuntimeError):
     """SSH fingerprint не сохранён или не совпадает с записанным ранее.
 
@@ -308,10 +318,7 @@ async def _connect(
     credentials: dict[str, str],
 ) -> asyncssh.SSHClientConnection:
     if not device.fingerprint:
-        raise FingerprintError(
-            "Для управления требуется сохранённый SSH fingerprint. "
-            "Переустановите ключ Ven4Control для этого устройства."
-        )
+        raise FingerprintError(MISSING_FINGERPRINT_MESSAGE)
     options = _connection_options(device, credentials)
     options.update(pinned_options(HostKeyPin(device.fingerprint)))
     try:

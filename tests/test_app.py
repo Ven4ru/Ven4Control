@@ -1,4 +1,10 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
+
+from PySide6.QtCore import QCoreApplication
+from PySide6.QtWidgets import QMessageBox
 
 from ven4control.app import (
     BULK_MESSAGE_LIMIT,
@@ -7,8 +13,10 @@ from ven4control.app import (
     RDP_UNKNOWN,
     RDP_UNSUPPORTED,
     BulkResult,
+    MainWindow,
     apply_rdp_result,
     bulk_report,
+    needs_key_install,
     online_summary,
     rdp_cell_text,
     rdp_check_label,
@@ -17,6 +25,7 @@ from ven4control.app import (
     tailscale_candidates,
     terminal_command,
 )
+from ven4control.dialogs import USERNAME_PLACEHOLDER
 from ven4control.models import Device
 from ven4control.rdp_tunnel import (
     STATUS_ACTIVE,
@@ -24,6 +33,250 @@ from ven4control.rdp_tunnel import (
     STATUS_STARTING,
     RdpTunnel,
 )
+from ven4control.remote_control import MISSING_FINGERPRINT_MESSAGE
+from ven4control.sftp_session import SftpSession
+from ven4control.storage import DeviceStorage
+from ven4control.terminal_session import TerminalSession
+
+
+def application() -> QCoreApplication:
+    """Сигналы Worker существуют только внутри приложения Qt."""
+    existing = QCoreApplication.instance()
+    return existing if existing is not None else QCoreApplication([])
+
+
+class FakeMessageBox:
+    """Подмена QMessageBox: диалоги записываются, а не показываются.
+
+    Перечисление кнопок настоящее — проверяемый код сравнивает ответ
+    именно с ним.
+    """
+
+    StandardButton = QMessageBox.StandardButton
+
+    def __init__(self, answer=QMessageBox.StandardButton.Yes) -> None:
+        self.answer = answer
+        self.shown: list[tuple[str, str, str]] = []
+
+    def question(self, _parent, title, text, *_args, **_kwargs):
+        self.shown.append(("question", title, text))
+        return self.answer
+
+    def information(self, _parent, title, text, *_args, **_kwargs) -> None:
+        self.shown.append(("information", title, text))
+
+    def warning(self, _parent, title, text, *_args, **_kwargs) -> None:
+        self.shown.append(("warning", title, text))
+
+    def critical(self, _parent, title, text, *_args, **_kwargs) -> None:
+        self.shown.append(("critical", title, text))
+
+    def kinds(self) -> list[str]:
+        return [kind for kind, _title, _text in self.shown]
+
+    def texts(self) -> str:
+        return "\n".join(text for _kind, _title, text in self.shown)
+
+
+def run_worker(worker) -> None:
+    """Выполняет задачу немедленно: в тесте нет ни пула, ни цикла Qt."""
+    try:
+        result = worker.function(*worker.args)
+    except Exception as error:  # как в Worker.run
+        worker.signals.failed.emit(str(error))
+    else:
+        worker.signals.finished.emit(result)
+
+
+class AddDeviceFingerprintTests(unittest.TestCase):
+    """Fingerprint сохраняется при подтверждении, а не при установке ключа.
+
+    Без записи в базе устройство видно в списке, но ни одна кнопка не
+    работает: `_connect`, терминал, SFTP и RDP требуют fingerprint.
+    Windows-устройства автоустановку ключа не поддерживают в принципе,
+    поэтому привязка к её успеху делала их вечно неуправляемыми.
+    """
+
+    def setUp(self) -> None:
+        application()
+        self._directory = TemporaryDirectory()
+        self.addCleanup(self._directory.cleanup)
+        self.storage = DeviceStorage(Path(self._directory.name) / "devices.db")
+        self.box = FakeMessageBox()
+        self.reloads = 0
+
+    def _window(self) -> MainWindow:
+        window = MainWindow.__new__(MainWindow)
+        window.storage = self.storage
+        window.private_key = Path("C:/Ven4Control/ssh/id_ed25519")
+        window.public_key = Path("C:/Ven4Control/ssh/id_ed25519.pub")
+        window.workers = set()
+        window._start_worker = run_worker
+        window.reload = self._count_reload
+        return window
+
+    def _count_reload(self) -> None:
+        self.reloads += 1
+
+    def _device(self, **fields) -> Device:
+        return self.storage.save(
+            Device(None, "Домашний ПК", "100.64.0.7", 22, "user", **fields)
+        )
+
+    def _saved(self) -> Device:
+        return self.storage.list_devices()[0]
+
+    def _probe(self, fingerprint: str = "SHA256:probe"):
+        async def probe(_device) -> str:
+            return fingerprint
+
+        return probe
+
+    def test_failed_key_install_still_leaves_a_manageable_device(self) -> None:
+        """Windows: установка ключа падает всегда, устройство обязано работать."""
+        device = self._device()
+
+        async def install(*_args, **_kwargs) -> str:
+            raise RuntimeError("Автоматическая установка поддерживает Linux и OpenWrt")
+
+        window = self._window()
+        with (
+            patch("ven4control.app.probe_device", self._probe()),
+            patch("ven4control.app.install_public_key", install),
+            patch("ven4control.app.QMessageBox", self.box),
+        ):
+            window._install_key(device, "секрет")
+
+        self.assertEqual("SHA256:probe", self._saved().fingerprint)
+        # Вход остаётся по паролю: ключа на устройстве нет.
+        self.assertEqual("password", self._saved().auth_type)
+        # Неудача автоустановки — не ошибка: устройство управляемо.
+        self.assertIn("information", self.box.kinds())
+        self.assertNotIn("warning", self.box.kinds())
+        self.assertIn("Установка ключа", self.box.texts())
+
+    def test_successful_key_install_switches_the_login(self) -> None:
+        device = self._device()
+
+        async def install(*_args, **_kwargs) -> str:
+            return "linux"
+
+        window = self._window()
+        with (
+            patch("ven4control.app.probe_device", self._probe()),
+            patch("ven4control.app.install_public_key", install),
+            patch("ven4control.app.QMessageBox", self.box),
+        ):
+            window._install_key(device, "секрет")
+
+        saved = self._saved()
+        self.assertEqual("SHA256:probe", saved.fingerprint)
+        self.assertEqual("key", saved.auth_type)
+        self.assertEqual("C:\\Ven4Control\\ssh\\id_ed25519", saved.key_path.replace("/", "\\"))
+
+    def test_device_with_a_ready_key_gets_a_fingerprint_without_installing(self) -> None:
+        """Ключ уже стоит на устройстве: ставить нечего, отпечаток нужен."""
+        device = self._device(auth_type="key", key_path="C:/keys/id_ed25519")
+
+        async def install(*_args, **_kwargs) -> str:
+            raise AssertionError("Установка ключа на этом пути недопустима")
+
+        window = self._window()
+        with (
+            patch("ven4control.app.probe_device", self._probe("SHA256:ready")),
+            patch("ven4control.app.install_public_key", install),
+            patch("ven4control.app.QMessageBox", self.box),
+        ):
+            window._capture_fingerprint_only(device)
+
+        self.assertEqual("SHA256:ready", self._saved().fingerprint)
+        self.assertEqual("key", self._saved().auth_type)
+
+    def test_declined_fingerprint_is_not_saved(self) -> None:
+        device = self._device()
+        self.box.answer = QMessageBox.StandardButton.No
+        window = self._window()
+        with (
+            patch("ven4control.app.probe_device", self._probe()),
+            patch("ven4control.app.QMessageBox", self.box),
+        ):
+            window._capture_fingerprint_only(device)
+        self.assertEqual("", self._saved().fingerprint)
+
+    def test_unreachable_device_reports_the_reason(self) -> None:
+        device = self._device()
+
+        async def probe(_device) -> str:
+            raise RuntimeError("Устройство не сообщило SSH fingerprint")
+
+        window = self._window()
+        with (
+            patch("ven4control.app.probe_device", probe),
+            patch("ven4control.app.QMessageBox", self.box),
+        ):
+            window._capture_fingerprint_only(device)
+        self.assertEqual("", self._saved().fingerprint)
+        self.assertIn("не сообщило SSH fingerprint", self.box.texts())
+        self.assertEqual(1, self.reloads)
+
+
+class KeyInstallDecisionTests(unittest.TestCase):
+    def test_password_device_with_the_checkbox_installs_the_key(self) -> None:
+        device = Device(None, "Роутер", "192.168.1.1", 22, "root")
+        self.assertTrue(needs_key_install(device, True, "секрет"))
+
+    def test_ready_key_is_never_reinstalled(self) -> None:
+        device = Device(None, "ПК", "100.64.0.7", 22, "user", auth_type="key")
+        self.assertFalse(needs_key_install(device, True, "секрет"))
+
+    def test_cleared_checkbox_is_respected(self) -> None:
+        device = Device(None, "Роутер", "192.168.1.1", 22, "root")
+        self.assertFalse(needs_key_install(device, False, "секрет"))
+
+    def test_empty_password_cannot_install_anything(self) -> None:
+        device = Device(None, "Роутер", "192.168.1.1", 22, "root")
+        self.assertFalse(needs_key_install(device, True, ""))
+
+
+class UsernameFieldTests(unittest.TestCase):
+    """Поле «Пользователь» пустое: `root` был реальным значением, не подсказкой."""
+
+    def test_placeholder_names_both_cases(self) -> None:
+        self.assertIn("root", USERNAME_PLACEHOLDER)
+        self.assertIn("Ubuntu", USERNAME_PLACEHOLDER)
+        self.assertNotEqual("root", USERNAME_PLACEHOLDER)
+
+
+class MissingFingerprintMessageTests(unittest.TestCase):
+    """Совет должен вести к действию, которое в приложении есть."""
+
+    def test_message_offers_a_real_action(self) -> None:
+        self.assertIn("Удалите устройство", MISSING_FINGERPRINT_MESSAGE)
+        self.assertNotIn("Переустановите ключ", MISSING_FINGERPRINT_MESSAGE)
+
+    def test_main_window_uses_the_shared_text(self) -> None:
+        box = FakeMessageBox()
+        window = MainWindow.__new__(MainWindow)
+        device = Device(1, "ПК", "100.64.0.7", 22, "user")
+        with patch("ven4control.app.QMessageBox", box):
+            self.assertFalse(
+                MainWindow._require_fingerprint(window, device, "Терминал недоступен")
+            )
+        self.assertIn(MISSING_FINGERPRINT_MESSAGE, box.texts())
+
+    def test_file_browser_uses_the_shared_text(self) -> None:
+        application()
+        session = SftpSession(Device(1, "ПК", "100.64.0.7", 22, "user"), {})
+        with self.assertRaises(ValueError) as error:
+            session.start()
+        self.assertIn(MISSING_FINGERPRINT_MESSAGE, str(error.exception))
+
+    def test_terminal_uses_the_shared_text(self) -> None:
+        application()
+        session = TerminalSession(Device(1, "ПК", "100.64.0.7", 22, "user"), {})
+        with self.assertRaises(ValueError) as error:
+            session.start()
+        self.assertIn(MISSING_FINGERPRINT_MESSAGE, str(error.exception))
 
 
 class TerminalCommandTests(unittest.TestCase):

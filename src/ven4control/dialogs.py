@@ -19,6 +19,12 @@ from ven4control.theme import THEME_LABELS, THEMES, apply_theme, build_palette
 from .models import Device
 
 
+# Подсказка поля «Пользователь». Значение по умолчанию здесь не ставится:
+# заполненный `root` новичок с Ubuntu или Windows не замечает и получает
+# Permission denied, не понимая причины.
+USERNAME_PLACEHOLDER = "root — для OpenWrt, ваше имя — для Ubuntu/Windows"
+
+
 class AddDeviceDialog(QDialog):
     def __init__(self, parent=None, groups: Sequence[str] = ()):
         super().__init__(parent)
@@ -39,7 +45,11 @@ class AddDeviceDialog(QDialog):
         self.port = QSpinBox()
         self.port.setRange(1, 65535)
         self.port.setValue(22)
-        self.username = QLineEdit("root")
+        self.username = QLineEdit()
+        # Не предзаполненное значение, а подсказка: `root` верен для OpenWrt,
+        # но на Ubuntu и Windows он давал незамеченный Permission denied —
+        # пользователь не видел, что поле уже заполнено за него.
+        self.username.setPlaceholderText(USERNAME_PLACEHOLDER)
         self.auth_type = QComboBox()
         self.auth_type.addItem("Логин и пароль", "password")
         self.auth_type.addItem("SSH-ключ", "key")

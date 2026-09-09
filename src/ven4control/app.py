@@ -30,6 +30,7 @@ from ven4control.rdp_tunnel import (
     tunnel_status_label,
 )
 from ven4control.remote_control import (
+    MISSING_FINGERPRINT_MESSAGE,
     RdpStatus,
     check_rdp,
     enable_rdp,
@@ -126,6 +127,21 @@ def section_header_text(title: str, expanded: bool) -> str:
     """Текст заголовка-переключателя раздела сайдбара: стрелка + название."""
     arrow = "▾" if expanded else "▸"
     return f"{arrow} {title}"
+
+
+def needs_key_install(
+    device: Device,
+    install_requested: bool,
+    password: str,
+) -> bool:
+    """Нужно ли пытаться поставить ключ Ven4Control при добавлении устройства.
+
+    Ключ ставится только там, где есть чем войти и куда ставить: вход по
+    паролю, галочка не снята, пароль введён. Во всех остальных случаях
+    устройству всё равно нужен подтверждённый fingerprint — но уже без
+    установки ключа.
+    """
+    return device.auth_type == "password" and install_requested and bool(password)
 
 
 def terminal_command(device: Device) -> list[str]:
@@ -815,48 +831,112 @@ class MainWindow(QMainWindow):
                     password=dialog.password.text(),
                     passphrase=dialog.passphrase.text(),
                 )
-            if (
-                device.auth_type == "password"
-                and dialog.install_key.isChecked()
-                and dialog.password.text()
+            if needs_key_install(
+                device, dialog.install_key.isChecked(), dialog.password.text()
             ):
                 self._install_key(device, dialog.password.text())
             else:
-                self.reload()
+                # Ключ либо уже стоит на устройстве, либо ставить его не
+                # просили — но без подтверждённого fingerprint устройство
+                # осталось бы неуправляемым: probe_device безопасна для
+                # любого типа входа, она ничего не аутентифицирует.
+                self._capture_fingerprint_only(device)
         except Exception as error:
             QMessageBox.critical(self, "Ошибка", str(error))
 
     def _install_key(self, device: Device, password: str) -> None:
+        """Добавление по паролю: сначала fingerprint, потом попытка ключа."""
+        self._capture_fingerprint(
+            device,
+            "Запомнить отпечаток и установить публичный ключ Ven4Control?",
+            lambda fingerprint: self._start_key_install(device, password, fingerprint),
+        )
+
+    def _capture_fingerprint_only(self, device: Device) -> None:
+        """Запрашивает и сохраняет fingerprint, ничего не устанавливая."""
+        self._capture_fingerprint(
+            device,
+            "Запомнить отпечаток и управлять устройством?",
+            lambda _fingerprint: self.reload(),
+        )
+
+    def _capture_fingerprint(
+        self,
+        device: Device,
+        prompt: str,
+        on_confirmed,
+    ) -> None:
+        """Спрашивает у устройства отпечаток и просит подтвердить его.
+
+        Путь один для всех устройств: `probe_device` подключается без
+        пароля и без ключей, поэтому применима и к Windows-машине, и к
+        устройству с уже установленным ключом.
+        """
         def operation():
             return asyncio.run(probe_device(device))
 
         worker = Worker(operation)
         worker.signals.finished.connect(
-            lambda result: self._confirm_key_install(device, password, str(result))
+            lambda result: self._confirm_fingerprint(
+                device, str(result), prompt, on_confirmed
+            )
         )
         worker.signals.failed.connect(
             lambda error: QMessageBox.warning(
-                self, "Устройство добавлено, но ключ не установлен", error
+                self,
+                "Устройство добавлено, но fingerprint не получен",
+                f"Не удалось получить SSH fingerprint устройства «{device.name}»:\n"
+                f"{error}\n\n"
+                "Управление будет недоступно. Удалите устройство и добавьте "
+                "заново, когда оно будет в сети.",
             )
         )
         worker.signals.failed.connect(self.reload)
         self._start_worker(worker)
 
-    def _confirm_key_install(
-        self, device: Device, password: str, fingerprint: str
+    def _confirm_fingerprint(
+        self,
+        device: Device,
+        fingerprint: str,
+        prompt: str,
+        on_confirmed,
     ) -> None:
         # Тип устройства здесь ещё не известен: до подтверждения отпечатка
         # приложение не отправляет устройству ни пароля, ни команд.
         answer = QMessageBox.question(
             self,
             "Подтверждение SSH fingerprint",
-            f"Fingerprint сервера {device.host}:\n{fingerprint}\n\n"
-            "Установить публичный ключ Ven4Control?",
+            f"Fingerprint сервера {device.host}:\n{fingerprint}\n\n{prompt}",
         )
         if answer != QMessageBox.StandardButton.Yes:
             self.reload()
             return
+        # Отпечаток сохраняется сразу и независимо от установки ключа: без
+        # него не работает ничего — ни терминал, ни SFTP, ни RDP, — а
+        # автоматическая установка ключа на Windows невозможна в принципе.
+        if not self._save_fingerprint(device, fingerprint):
+            return
+        on_confirmed(fingerprint)
 
+    def _save_fingerprint(self, device: Device, fingerprint: str) -> bool:
+        """Записывает подтверждённый отпечаток. False — запись не удалась."""
+        device.fingerprint = fingerprint
+        try:
+            self.storage.save(device)
+        except Exception as error:
+            QMessageBox.critical(
+                self,
+                "Fingerprint не сохранён",
+                f"Отпечаток подтверждён, но запись в базе не обновлена:\n"
+                f"{error}\n\nДобавьте устройство заново.",
+            )
+            self.reload()
+            return False
+        return True
+
+    def _start_key_install(
+        self, device: Device, password: str, fingerprint: str
+    ) -> None:
         def operation():
             return asyncio.run(
                 install_public_key(device, password, self.public_key, fingerprint)
@@ -864,20 +944,34 @@ class MainWindow(QMainWindow):
 
         worker = Worker(operation)
         worker.signals.finished.connect(
-            lambda detected: self._key_installed(
-                device, str(detected), fingerprint
-            )
+            lambda detected: self._key_installed(device, str(detected))
         )
         worker.signals.failed.connect(
-            lambda error: QMessageBox.warning(self, "Ключ не установлен", error)
+            lambda error: self._key_install_failed(device, error)
         )
-        worker.signals.failed.connect(self.reload)
         self._start_worker(worker)
 
-    def _key_installed(self, device: Device, system: str, fingerprint: str) -> None:
+    def _key_install_failed(self, device: Device, error: str) -> None:
+        """Ключ не поставился — это не отказ в управлении, а сообщение.
+
+        Автоматическая установка умеет только Linux и OpenWrt, поэтому на
+        Windows этот путь заканчивается неудачей всегда. Отпечаток уже
+        сохранён, и устройство полностью управляемо по паролю.
+        """
+        QMessageBox.information(
+            self,
+            "Устройство добавлено, ключ не установлен",
+            f"Fingerprint устройства «{device.name}» подтверждён, устройство "
+            "доступно для управления.\n\n"
+            f"Автоматическая установка ключа не удалась: {error}\n\n"
+            "Пароль будет запрашиваться при каждом подключении, либо "
+            "установите ключ вручную (см. кнопку «Установка ключа» в сайдбаре).",
+        )
+        self.reload()
+
+    def _key_installed(self, device: Device, system: str) -> None:
         device.auth_type = "key"
         device.key_path = str(self.private_key)
-        device.fingerprint = fingerprint
         try:
             self.storage.save(device)
         except Exception as error:
@@ -1076,12 +1170,7 @@ class MainWindow(QMainWindow):
         """Терминал и RDP идут по тому же доверенному каналу: без fingerprint нельзя."""
         if device.fingerprint:
             return True
-        QMessageBox.warning(
-            self,
-            title,
-            "Для устройства не сохранён SSH fingerprint. "
-            "Переустановите ключ Ven4Control и повторите.",
-        )
+        QMessageBox.warning(self, title, MISSING_FINGERPRINT_MESSAGE)
         return False
 
     def _set_rdp_result(
@@ -1237,8 +1326,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Фоновое логирование недоступно",
-                "Для устройства не сохранён SSH fingerprint. "
-                "Переустановите ключ Ven4Control и повторите.",
+                MISSING_FINGERPRINT_MESSAGE,
             )
             return
         try:

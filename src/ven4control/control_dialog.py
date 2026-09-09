@@ -35,6 +35,7 @@ from ven4control.log_storage import EXPORT_FORMATS
 from ven4control.log_worker import status_label
 from ven4control.models import Device
 from ven4control.remote_control import (
+    MISSING_FINGERPRINT_MESSAGE,
     PackageResult,
     ServiceInfo,
     SystemOverview,
@@ -306,8 +307,7 @@ class DeviceControlDialog(QDialog):
             QMessageBox.warning(
                 self,
                 "Фоновое логирование недоступно",
-                "Для устройства не сохранён SSH fingerprint. "
-                "Переустановите ключ Ven4Control и повторите.",
+                MISSING_FINGERPRINT_MESSAGE,
             )
             return
         export_format = str(self.background_format.currentData())
