@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from dataclasses import replace
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -7,9 +8,12 @@ from PySide6.QtWidgets import (
     QSpinBox, QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
+from ven4control import __version__
 from ven4control.ansi_screen import set_default_colors as set_terminal_colors
 from ven4control.settings import (
     TERMINAL_THEME_SYNC,
+    UPDATE_CHECK_DISABLED,
+    UPDATE_CHECK_ENABLED,
     AppSettings,
     save_settings,
     terminal_palette,
@@ -176,6 +180,9 @@ class SettingsDialog(QDialog):
         self.resize(380, 480)
         self.selected_theme = settings.theme
         self.selected_terminal_theme = settings.terminal_theme
+        # Исходные настройки целиком: _save переносит из них поля, которыми
+        # диалог не управляет.
+        self._settings = settings
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("Тема интерфейса"))
@@ -211,10 +218,38 @@ class SettingsDialog(QDialog):
             self._terminal_buttons[theme] = button
             layout.addWidget(button)
 
+        layout.addSpacing(12)
+        layout.addWidget(QLabel("Обновления"))
+        layout.addWidget(QLabel(f"Текущая версия: {__version__}"))
+        self.update_checkbox = QCheckBox(
+            "Проверять обновления при запуске (не чаще раза в сутки)"
+        )
+        self.update_checkbox.setChecked(settings.update_check == UPDATE_CHECK_ENABLED)
+        self.update_checkbox.toggled.connect(lambda _checked: self._save())
+        layout.addWidget(self.update_checkbox)
+        hint = QLabel(
+            "Проверка обращается к GitHub — это единственный запрос приложения "
+            "наружу, и он раскрывает ваш IP-адрес."
+        )
+        hint.setWordWrap(True)
+        hint.setTextFormat(Qt.TextFormat.PlainText)
+        layout.addWidget(hint)
+        self.check_now_button = QPushButton("Проверить сейчас")
+        layout.addWidget(self.check_now_button)
+
         layout.addStretch()
         buttons_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons_box.rejected.connect(self.reject)
         layout.addWidget(buttons_box)
+
+    @property
+    def selected_update_check(self) -> str:
+        """Согласие в том виде, в каком его надо сохранить."""
+        return (
+            UPDATE_CHECK_ENABLED
+            if self.update_checkbox.isChecked()
+            else UPDATE_CHECK_DISABLED
+        )
 
     @staticmethod
     def _theme_button(label: str, accent: str | None, checked: bool) -> QPushButton:
@@ -260,6 +295,15 @@ class SettingsDialog(QDialog):
         set_terminal_colors(palette["content_background"], palette["text_primary"])
 
     def _save(self) -> None:
+        # replace, а не новый AppSettings: диалог правит только то, чем
+        # управляет, а остальные поля переносит как есть. Со сборкой объекта
+        # с нуля смена темы затирала бы согласие на проверку обновлений и
+        # отметку времени, и то же повторилось бы с любым новым полем.
         save_settings(
-            AppSettings(theme=self.selected_theme, terminal_theme=self.selected_terminal_theme)
+            replace(
+                self._settings,
+                theme=self.selected_theme,
+                terminal_theme=self.selected_terminal_theme,
+                update_check=self.selected_update_check,
+            )
         )
