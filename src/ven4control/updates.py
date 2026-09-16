@@ -9,7 +9,9 @@
 """
 from __future__ import annotations
 
+import os
 import re
+import sys
 from dataclasses import dataclass
 
 # Теги релизов исторически разной формы: v0.4-beta, v0.4.1-beta, v0.5.0-beta.
@@ -107,3 +109,50 @@ def select_update(release: dict, current_version: str) -> UpdateInfo | None:
         sha256=sha256,
         page_url=page_url if isinstance(page_url, str) else "",
     )
+
+
+REGISTRY_KEY = r"Software\Ven4Control"
+REGISTRY_VALUE = "InstallDir"
+
+
+def installed_dir() -> str | None:
+    """Каталог установки из реестра или None, если приложение не устанавливали.
+
+    Значение пишет установщик NSIS. Его отсутствие означает портативную копию.
+    """
+    try:
+        import winreg
+    except ImportError:  # не Windows — портативный запуск из исходников
+        return None
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, REGISTRY_KEY) as key:
+            value, _ = winreg.QueryValueEx(key, REGISTRY_VALUE)
+    except OSError:
+        return None
+    return value if isinstance(value, str) and value else None
+
+
+def _same_dir(left: str, right: str) -> bool:
+    try:
+        return os.path.normcase(os.path.abspath(left)) == os.path.normcase(
+            os.path.abspath(right)
+        )
+    except OSError:
+        return False
+
+
+def is_installed_copy(
+    executable: str | None = None,
+    install_dir: str | None = None,
+) -> bool:
+    """Запущена ли установленная копия, а не портативная.
+
+    Сравниваются каталог запущенного файла и каталог из реестра, с
+    нормализацией: Windows не различает регистр, а разделители и хвостовой
+    слэш могут отличаться (установщик пишет App, пользователь мог создать app).
+    """
+    exe = executable if executable is not None else sys.executable
+    target = install_dir if install_dir is not None else installed_dir()
+    if not target:
+        return False
+    return _same_dir(os.path.dirname(exe), target)

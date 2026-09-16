@@ -1,6 +1,13 @@
 import unittest
+from unittest import mock
 
-from ven4control.updates import UpdateInfo, is_newer, parse_release_tag, select_update
+from ven4control.updates import (
+    UpdateInfo,
+    is_installed_copy,
+    is_newer,
+    parse_release_tag,
+    select_update,
+)
 
 
 def release(tag: str = "v0.6.0-beta", assets: list[dict] | None = None) -> dict:
@@ -116,6 +123,51 @@ class SelectUpdateTests(unittest.TestCase):
 
     def test_empty_release_is_refused(self) -> None:
         self.assertIsNone(select_update({}, "0.5.0"))
+
+
+class InstallationKindTests(unittest.TestCase):
+    def test_exe_inside_registered_directory_is_installed(self) -> None:
+        self.assertTrue(
+            is_installed_copy(
+                executable=r"C:\Users\Ann\AppData\Local\Ven4Control\App\Ven4Control.exe",
+                install_dir=r"C:\Users\Ann\AppData\Local\Ven4Control\App",
+            )
+        )
+
+    def test_case_and_separator_differences_do_not_matter(self) -> None:
+        """Установщик пишет App, пользователь мог создать app — Windows не различает."""
+        self.assertTrue(
+            is_installed_copy(
+                executable=r"C:\Users\Ann\AppData\Local\Ven4Control\app\Ven4Control.exe",
+                install_dir="C:/Users/Ann/AppData/Local/Ven4Control/App/",
+            )
+        )
+
+    def test_exe_elsewhere_is_portable(self) -> None:
+        self.assertFalse(
+            is_installed_copy(
+                executable=r"D:\Downloads\Ven4Control.exe",
+                install_dir=r"C:\Users\Ann\AppData\Local\Ven4Control\App",
+            )
+        )
+
+    def test_without_registry_entry_it_is_portable(self) -> None:
+        """Записи в реестре нет — значит копию не устанавливали.
+
+        Путь из реестра подменяется явно: иначе тест читал бы реестр машины,
+        на которой запущен, и его результат зависел бы от того, установлен ли
+        там Ven4Control.
+        """
+        from ven4control import updates
+
+        with mock.patch.object(updates, "installed_dir", return_value=None):
+            self.assertFalse(
+                updates.is_installed_copy(
+                    executable=(
+                        r"C:\Users\Ann\AppData\Local\Ven4Control\App\Ven4Control.exe"
+                    )
+                )
+            )
 
 
 if __name__ == "__main__":
