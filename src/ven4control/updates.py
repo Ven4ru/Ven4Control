@@ -9,12 +9,20 @@
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import pathlib
 import re
+import shutil
 import sys
+import tempfile
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+from ven4control._version import __version__
 from ven4control.settings import UPDATE_CHECK_ENABLED, AppSettings
 
 # Теги релизов исторически разной формы: v0.4-beta, v0.4.1-beta, v0.5.0-beta.
@@ -181,3 +189,96 @@ def should_check(settings: AppSettings, now: datetime) -> bool:
     except ValueError:
         return True
     return now - last >= timedelta(hours=CHECK_INTERVAL_HOURS)
+
+
+REPO = "Ven4ru/Ven4Control"
+LATEST_RELEASE_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
+RELEASES_PAGE_URL = f"https://github.com/{REPO}/releases"
+
+# GitHub отвечает 403 на запрос без User-Agent — это не опция.
+USER_AGENT = f"Ven4Control/{__version__}"
+
+DOWNLOAD_CHUNK = 256 * 1024
+
+
+class UpdateCheckError(Exception):
+    """Проверку обновлений выполнить не удалось."""
+
+
+class RateLimitedError(UpdateCheckError):
+    """GitHub временно ограничил число запросов.
+
+    Отдельный тип нужен ради честного текста: лимит в 60 запросов в час
+    считается на IP-адрес, поэтому за общим адресом (мобильный оператор, офис)
+    он делится с соседями, и «ошибка сети» здесь была бы неправдой.
+    """
+
+
+def fetch_latest_release(timeout: float = 15.0) -> dict:
+    """Забирает последний релиз. Помеченные prerelease GitHub сюда не включает."""
+    request = urllib.request.Request(
+        LATEST_RELEASE_URL,
+        headers={
+            "User-Agent": USER_AGENT,
+            "Accept": "application/vnd.github+json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        if error.code == 403 and error.headers.get("X-RateLimit-Remaining") == "0":
+            raise RateLimitedError(
+                "GitHub временно ограничил число запросов — попробуйте позже"
+            ) from error
+        raise UpdateCheckError(f"GitHub ответил {error.code}") from error
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        raise UpdateCheckError(f"Не удалось связаться с GitHub: {error}") from error
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise UpdateCheckError("GitHub вернул неразборчивый ответ") from error
+    if not isinstance(payload, dict):
+        raise UpdateCheckError("GitHub вернул неожиданный ответ")
+    return payload
+
+
+def check_for_update(current_version: str, timeout: float = 15.0) -> UpdateInfo | None:
+    """Полная проверка: запрос плюс выбор ассета. Бросает UpdateCheckError."""
+    return select_update(fetch_latest_release(timeout=timeout), current_version)
+
+
+def verify_sha256(path: pathlib.Path, expected: str) -> bool:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(DOWNLOAD_CHUNK), b""):
+            digest.update(chunk)
+    return digest.hexdigest().lower() == expected.strip().lower()
+
+
+def download_installer(update: UpdateInfo, timeout: float = 300.0) -> pathlib.Path:
+    """Скачивает установщик и сверяет контрольную сумму.
+
+    Каталог создаётся с уникальным именем, а не по предсказуемому пути: общий
+    временный каталог доступен на запись другим процессам, и предсказуемое имя
+    позволяет подменить цель. Не совпал хеш — файл удаляется и обновление
+    отменяется, «попробовать ещё раз» здесь неуместно.
+    """
+    directory = pathlib.Path(tempfile.mkdtemp(prefix="ven4control_update_"))
+    target = directory / update.asset_name
+    request = urllib.request.Request(
+        update.download_url, headers={"User-Agent": USER_AGENT}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            with open(target, "wb") as handle:
+                while chunk := response.read(DOWNLOAD_CHUNK):
+                    handle.write(chunk)
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise UpdateCheckError(f"Не удалось скачать обновление: {error}") from error
+
+    if not verify_sha256(target, update.sha256):
+        shutil.rmtree(directory, ignore_errors=True)
+        raise UpdateCheckError(
+            "Контрольная сумма скачанного файла не совпала — обновление отменено"
+        )
+    return target

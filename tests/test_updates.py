@@ -1,3 +1,6 @@
+import hashlib
+import pathlib
+import tempfile
 import unittest
 from datetime import datetime, timedelta
 from unittest import mock
@@ -223,6 +226,64 @@ class ShouldCheckTests(unittest.TestCase):
                 self._settings(UPDATE_CHECK_ENABLED, "позавчера"), datetime(2026, 9, 16)
             )
         )
+
+
+class VerifyHashTests(unittest.TestCase):
+    def _file(self, directory: str, payload: bytes = b"content") -> pathlib.Path:
+        target = pathlib.Path(directory) / "file.bin"
+        target.write_bytes(payload)
+        return target
+
+    def test_matching_hash_passes(self) -> None:
+        from ven4control.updates import verify_sha256
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._file(directory)
+            self.assertTrue(
+                verify_sha256(target, hashlib.sha256(b"content").hexdigest())
+            )
+
+    def test_different_hash_fails(self) -> None:
+        from ven4control.updates import verify_sha256
+
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertFalse(verify_sha256(self._file(directory), "0" * 64))
+
+    def test_comparison_ignores_case(self) -> None:
+        from ven4control.updates import verify_sha256
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._file(directory)
+            self.assertTrue(
+                verify_sha256(target, hashlib.sha256(b"content").hexdigest().upper())
+            )
+
+
+class CheckForUpdateTests(unittest.TestCase):
+    def test_returns_update_when_release_is_newer(self) -> None:
+        from ven4control import updates
+
+        with mock.patch.object(updates, "fetch_latest_release", return_value=release()):
+            found = updates.check_for_update("0.5.0")
+        self.assertIsNotNone(found)
+        self.assertEqual("0.6.0", found.version)
+
+    def test_returns_none_when_up_to_date(self) -> None:
+        from ven4control import updates
+
+        payload = release("v0.5.0-beta")
+        with mock.patch.object(updates, "fetch_latest_release", return_value=payload):
+            self.assertIsNone(updates.check_for_update("0.5.0"))
+
+    def test_rate_limit_is_reported_separately(self) -> None:
+        """Иначе человек решит, что у него сломался интернет."""
+        from ven4control import updates
+
+        with mock.patch.object(
+            updates, "fetch_latest_release", side_effect=updates.RateLimitedError()
+        ):
+            with self.assertRaises(updates.RateLimitedError):
+                updates.check_for_update("0.5.0")
 
 
 if __name__ == "__main__":
