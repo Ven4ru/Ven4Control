@@ -1,5 +1,6 @@
 import time
 import unittest
+from unittest.mock import patch
 
 from ven4control.models import Device
 from ven4control.rdp_tunnel import (
@@ -76,14 +77,37 @@ class FakeProcess:
         self.code = 0
 
 
+MSTSC = "C:\\Windows\\System32\\mstsc.exe"
+
+
+def patched_mstsc(path: str | None = MSTSC):
+    return patch("ven4control.rdp_tunnel.mstsc_path", return_value=path)
+
+
 class MstscCommandTests(unittest.TestCase):
     def test_client_always_connects_to_the_loopback(self) -> None:
         """Обращаться к адресу устройства нельзя: RDP идёт внутри туннеля."""
-        self.assertEqual(["mstsc.exe", "/v:127.0.0.1:54321"], mstsc_command(54321))
+        with patched_mstsc():
+            self.assertEqual([MSTSC, "/v:127.0.0.1:54321"], mstsc_command(54321))
 
     def test_assigned_port_is_used_as_is(self) -> None:
-        self.assertEqual(["mstsc.exe", f"/v:{LOOPBACK}:1"], mstsc_command(1))
-        self.assertEqual(["mstsc.exe", f"/v:{LOOPBACK}:65535"], mstsc_command(65535))
+        with patched_mstsc():
+            self.assertEqual([MSTSC, f"/v:{LOOPBACK}:1"], mstsc_command(1))
+            self.assertEqual([MSTSC, f"/v:{LOOPBACK}:65535"], mstsc_command(65535))
+
+    def test_client_is_launched_by_absolute_path(self) -> None:
+        """Голое имя Windows ищет начиная с каталога процесса.
+
+        Приложение раздаётся портативным EXE и запускается обычно из «Загрузок»:
+        подменённый `mstsc.exe` рядом с ним получил бы локальный конец туннеля.
+        """
+        with patched_mstsc():
+            self.assertTrue(mstsc_command(3390)[0].endswith("System32\\mstsc.exe"))
+
+    def test_missing_client_is_reported(self) -> None:
+        with patched_mstsc(None):
+            with self.assertRaises(RuntimeError):
+                mstsc_command(3390)
 
     def test_port_outside_the_range_is_rejected(self) -> None:
         for port in (0, -1, 65536):

@@ -326,6 +326,17 @@ class TerminalCommandTests(unittest.TestCase):
         device = Device(1, "ПК", "host", 22, "root", auth_type="key")
         self.assertEqual(["ssh", "-p", "22", "root@host"], terminal_command(device))
 
+    def test_resolved_executable_replaces_the_bare_name(self) -> None:
+        """Голое имя Windows ищет начиная с каталога процесса.
+
+        Приложение раздаётся портативным EXE и запускается обычно из «Загрузок»:
+        подменённый `ssh.exe` рядом с ним получил бы и адрес устройства, и путь
+        к приватному ключу.
+        """
+        device = Device(1, "Сервер", "100.64.0.1", 22, "root")
+        resolved = r"C:\Windows\System32\OpenSSH\ssh.exe"
+        self.assertEqual(resolved, terminal_command(device, resolved)[0])
+
 
 class RdpPanelStateTests(unittest.TestCase):
     def _device(self) -> Device:

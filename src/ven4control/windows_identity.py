@@ -12,6 +12,7 @@ from __future__ import annotations
 import csv
 import os
 import subprocess
+import sys
 
 
 WHOAMI_TIMEOUT = 15
@@ -27,6 +28,85 @@ def system32_path(*parts: str) -> str:
     """
     root = os.environ.get("SystemRoot") or os.environ.get("windir") or "C:\\Windows"
     return os.path.join(root, "System32", *parts)
+
+
+def _same_dir(left: str, right: str) -> bool:
+    try:
+        return os.path.normcase(os.path.abspath(left)) == os.path.normcase(
+            os.path.abspath(right)
+        )
+    except OSError:
+        return False
+
+
+def unsafe_search_dirs() -> list[str]:
+    """Каталоги, которые нельзя использовать для поиска внешних программ.
+
+    Windows ищет имя без пути начиная с каталога самого процесса и текущего
+    каталога. Приложение раздаётся портативным onefile-EXE, который обычно
+    запускают прямо из «Загрузок», — то есть оба этих каталога содержат что
+    угодно, скачанное пользователем.
+    """
+    dirs = [os.getcwd(), os.path.dirname(os.path.abspath(sys.executable))]
+    bundle = getattr(sys, "_MEIPASS", "")
+    if bundle:
+        dirs.append(bundle)
+    return [d for d in dirs if d]
+
+
+def resolve_program(name: str, *preferred: str) -> str | None:
+    """Абсолютный путь к внешней программе или None, если её нет.
+
+    Сначала проверяются известные места установки, затем PATH, из которого
+    исключены каталог процесса и текущий каталог (см. `unsafe_search_dirs`).
+    Возврат None означает «программа не найдена» — вызывающий код обязан
+    сказать об этом пользователю, а не подставлять голое имя: именно голое
+    имя и приводило к запуску файла, лежащего рядом с Ven4Control.exe.
+    """
+    for candidate in preferred:
+        if candidate and os.path.isfile(candidate):
+            return candidate
+    unsafe = unsafe_search_dirs()
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        entry = entry.strip().strip('"')
+        if not entry or any(_same_dir(entry, bad) for bad in unsafe):
+            continue
+        candidate = os.path.join(entry, name)
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def ssh_path() -> str | None:
+    """Путь к клиенту OpenSSH, поставляемому с Windows."""
+    return resolve_program("ssh.exe", system32_path("OpenSSH", "ssh.exe"))
+
+
+def mstsc_path() -> str | None:
+    """Путь к клиенту подключения к удалённому рабочему столу."""
+    return resolve_program("mstsc.exe", system32_path("mstsc.exe"))
+
+
+def windows_terminal_path() -> str | None:
+    """Путь к Windows Terminal: он ставится из Store в WindowsApps."""
+    local = os.environ.get("LOCALAPPDATA", "")
+    preferred = (
+        os.path.join(local, "Microsoft", "WindowsApps", "wt.exe") if local else ""
+    )
+    return resolve_program("wt.exe", preferred)
+
+
+def tailscale_path() -> str | None:
+    """Путь к консольному клиенту Tailscale."""
+    preferred = [
+        os.path.join(root, "Tailscale", "tailscale.exe")
+        for root in (
+            os.environ.get("ProgramFiles", ""),
+            os.environ.get("ProgramFiles(x86)", ""),
+        )
+        if root
+    ]
+    return resolve_program("tailscale.exe", *preferred)
 
 
 def current_user_sid() -> str:

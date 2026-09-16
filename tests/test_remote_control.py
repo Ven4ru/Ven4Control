@@ -26,6 +26,7 @@ from ven4control.remote_control import (
     install_ven4tools,
     is_rdp_enabled,
     list_services,
+    parse_backup_path,
     read_logs,
     reboot_device,
     restart_service,
@@ -237,7 +238,7 @@ class WindowsGuardTests(unittest.TestCase):
 
     def test_backup_command_has_no_windows_variant(self) -> None:
         with self.assertRaises(RuntimeError) as raised:
-            build_backup_command("windows", "/tmp/копия.tar.gz")
+            build_backup_command("windows")
         self.assertEqual(WINDOWS_UNSUPPORTED, str(raised.exception))
 
     def test_posix_devices_are_untouched(self) -> None:
@@ -386,22 +387,54 @@ class SystemdParsingTests(unittest.TestCase):
 
 class BackupCommandTests(unittest.TestCase):
     def test_openwrt_uses_sysupgrade(self) -> None:
-        self.assertEqual(
-            "sysupgrade -b /tmp/backup.tar.gz",
-            build_backup_command("openwrt", "/tmp/backup.tar.gz"),
-        )
+        command = build_backup_command("openwrt")
+        self.assertIn("mktemp", command)
+        self.assertIn('sysupgrade -b "$f"', command)
+        self.assertIn('echo "$f"', command)
 
     def test_missing_path_does_not_abort_collection(self) -> None:
         """`set -e` вместе с `[ -e ... ] &&` обрывал сбор на первом же пропуске."""
-        command = build_backup_command("linux", "/tmp/backup.tar.gz")
+        command = build_backup_command("linux")
         self.assertNotIn("set -eu", command)
         self.assertIn("if [ -e \"$p\" ]; then", command)
-        self.assertIn("tar -czf /tmp/backup.tar.gz", command)
+        self.assertIn('tar -czf "$f"', command)
 
     def test_empty_selection_reports_reason(self) -> None:
-        command = build_backup_command("linux", "/tmp/backup.tar.gz")
+        command = build_backup_command("linux")
         self.assertIn("нет конфигов для копирования", command)
         self.assertIn("exit 1", command)
+
+    def test_empty_selection_removes_the_temporary_file(self) -> None:
+        """Отказ по «нет конфигов» не должен оставлять пустой файл в /tmp."""
+        self.assertIn('rm -f "$f"', build_backup_command("linux"))
+
+    def test_archive_name_is_chosen_by_the_device(self) -> None:
+        """Предсказуемое имя в /tmp давало подмену цели симлинком.
+
+        Клиент больше не задаёт путь вовсе: `mktemp` создаёт файл атомарно и с
+        правами 600, поэтому `sudo tar` не может быть направлен на чужой файл,
+        а архив с приватными ключами не читается остальными пользователями.
+        """
+        for platform in ("openwrt", "linux"):
+            with self.subTest(platform=platform):
+                command = build_backup_command(platform)
+                # Шаблон заканчивается на X-ы: BusyBox не умеет суффикс после них.
+                self.assertIn("mktemp /tmp/ven4control-backup-XXXXXX", command)
+                self.assertNotIn("XXXXXX.tar.gz", command)
+                # Ни одной подстановки пути со стороны клиента не осталось.
+                self.assertNotIn("/tmp/ven4control-backup-2", command)
+
+    def test_path_is_read_from_the_last_line_of_output(self) -> None:
+        self.assertEqual(
+            "/tmp/ven4control-backup-AbC123.tar.gz",
+            parse_backup_path(
+                "предупреждение sysupgrade\n/tmp/ven4control-backup-AbC123.tar.gz\n"
+            ),
+        )
+
+    def test_missing_path_in_output_is_reported(self) -> None:
+        with self.assertRaises(RuntimeError):
+            parse_backup_path("tar: что-то пошло не так\n")
 
 
 class TailscaleHealthTests(unittest.TestCase):

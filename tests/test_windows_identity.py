@@ -1,5 +1,6 @@
 import os
 import subprocess
+import tempfile
 import unittest
 from unittest import mock
 
@@ -105,6 +106,59 @@ class CurrentUserSidTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "Проверка предназначена для Windows")
     def test_live_windows_answers_with_a_sid(self) -> None:
         self.assertRegex(windows_identity.current_user_sid(), r"^S-1-5-21-[\d-]+$")
+
+
+class ResolveProgramTests(unittest.TestCase):
+    """Внешние программы ищутся мимо каталога процесса и текущего каталога.
+
+    Тот же класс проблемы, что и у системных программ выше, но для `ssh`,
+    `mstsc`, `wt` и `tailscale`: подделка, положенная рядом с портативным
+    `Ven4Control.exe`, получала бы адрес устройства, путь к приватному ключу
+    или живой локальный конец RDP-туннеля.
+    """
+
+    def test_known_location_wins_over_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            preferred = os.path.join(directory, "tool.exe")
+            open(preferred, "wb").close()
+            with mock.patch.dict("os.environ", {"PATH": ""}, clear=True):
+                self.assertEqual(
+                    preferred, windows_identity.resolve_program("tool.exe", preferred)
+                )
+
+    def test_process_directory_is_never_searched(self) -> None:
+        """Каталог рядом с EXE исключается, даже если он есть в PATH."""
+        with tempfile.TemporaryDirectory() as directory:
+            planted = os.path.join(directory, "tool.exe")
+            open(planted, "wb").close()
+            fake_exe = os.path.join(directory, "Ven4Control.exe")
+            with mock.patch.dict("os.environ", {"PATH": directory}, clear=True), \
+                    mock.patch.object(windows_identity.sys, "executable", fake_exe):
+                self.assertIsNone(windows_identity.resolve_program("tool.exe"))
+
+    def test_current_directory_is_never_searched(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            planted = os.path.join(directory, "tool.exe")
+            open(planted, "wb").close()
+            with mock.patch.dict("os.environ", {"PATH": directory}, clear=True), \
+                    mock.patch.object(os, "getcwd", return_value=directory):
+                self.assertIsNone(windows_identity.resolve_program("tool.exe"))
+
+    def test_unrelated_path_entry_is_used(self) -> None:
+        """Обычный каталог из PATH по-прежнему годится: совместимость сохранена."""
+        with tempfile.TemporaryDirectory() as directory:
+            planted = os.path.join(directory, "tool.exe")
+            open(planted, "wb").close()
+            with mock.patch.dict("os.environ", {"PATH": directory}, clear=True), \
+                    mock.patch.object(os, "getcwd", return_value=os.path.sep), \
+                    mock.patch.object(
+                        windows_identity.sys, "executable", "C:\\python\\python.exe"
+                    ):
+                self.assertEqual(planted, windows_identity.resolve_program("tool.exe"))
+
+    def test_missing_program_returns_none(self) -> None:
+        with mock.patch.dict("os.environ", {"PATH": ""}, clear=True):
+            self.assertIsNone(windows_identity.resolve_program("нет-такой.exe"))
 
 
 if __name__ == "__main__":

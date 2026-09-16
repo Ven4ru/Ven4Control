@@ -1134,24 +1134,59 @@ async def install_openwrt_upgrade(
         await connection.wait_closed()
 
 
-def build_backup_command(platform: str, remote_path: str) -> str:
-    """Собирает команду создания архива конфигов.
+# Шаблон обязан заканчиваться на «XXXXXX»: BusyBox на OpenWrt передаёт его
+# прямо в mkstemp(), который суффикс после X-ов не поддерживает (в отличие от
+# GNU mktemp). Расширение на устройстве и не нужно — локальная копия получает
+# осмысленное имя при сохранении.
+BACKUP_NAME_TEMPLATE = "/tmp/ven4control-backup-XXXXXX"
+
+
+def build_backup_command(platform: str) -> str:
+    """Собирает команду создания архива конфигов во временном файле устройства.
+
+    Имя файла выбирает `mktemp` на самом устройстве, а не клиент. Прошлый
+    вариант подставлял предсказуемое `/tmp/ven4control-backup-<время>.tar.gz`:
+    в общий каталог со sticky-битом локальный пользователь мог заранее положить
+    симлинк с таким именем, и `sudo tar` перезаписывал от root произвольный
+    файл — вплоть до `/etc/shadow`. `mktemp` создаёт файл атомарно (O_EXCL),
+    так что подменить цель нечем, и с правами 600 — архив с `/etc/ssh` и
+    `/etc/wireguard` (приватные host-ключи и ключи VPN) не читается остальными
+    пользователями устройства. Владельцем остаётся тот же пользователь, что
+    подключился: иначе `rm` в `/tmp` со sticky-битом не мог удалить
+    root-овский файл, и архив с ключами оставался на устройстве навсегда.
+
+    Путь к созданному файлу возвращается последней строкой stdout.
 
     Прошлый вариант использовал `set -e` вместе с `[ -e "$p" ] && ...`:
     первый же отсутствующий путь завершал оболочку, и копия не создавалась.
     """
     if platform == "windows":
         raise RuntimeError(WINDOWS_UNSUPPORTED)
+    create = f'f="$(mktemp {BACKUP_NAME_TEMPLATE})" || exit 1; '
     if platform == "openwrt":
-        return f"sysupgrade -b {remote_path}"
+        # На OpenWrt всё и так выполняется от root, sudo там нет.
+        return create + 'sysupgrade -b "$f" >/dev/null || exit 1; echo "$f"'
     return (
-        "set -u; files=''; "
+        "set -u; " + create + "files=''; "
         "for p in /etc/ssh /etc/systemd/system /etc/wireguard; do "
         "if [ -e \"$p\" ]; then files=\"$files ${p#/}\"; fi; done; "
-        "if [ -z \"$files\" ]; then "
+        "if [ -z \"$files\" ]; then rm -f \"$f\"; "
         "echo 'На устройстве нет конфигов для копирования' >&2; exit 1; fi; "
-        f"sudo -n tar -czf {remote_path} -C / $files"
+        'sudo -n tar -czf "$f" -C / $files >/dev/null || exit 1; echo "$f"'
     )
+
+
+def parse_backup_path(stdout: str) -> str:
+    """Достаёт путь к созданному архиву из вывода команды копирования.
+
+    Берётся последняя непустая строка: `sysupgrade`/`tar` могут написать в
+    stdout что-то своё до того, как команда напечатает путь.
+    """
+    for line in reversed(stdout.splitlines()):
+        candidate = line.strip()
+        if candidate.startswith("/"):
+            return candidate
+    raise RuntimeError("Устройство не сообщило, куда сохранило резервную копию")
 
 
 async def backup_configs(
@@ -1168,13 +1203,13 @@ async def backup_configs(
         safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", device.name).strip("_") or "device"
         destination.mkdir(parents=True, exist_ok=True)
         local_path = destination / f"{safe_name}-{platform}-{stamp}.tar.gz"
-        remote_path = f"/tmp/ven4control-backup-{stamp}.tar.gz"
-        await _run(
+        result = await _run(
             connection,
-            build_backup_command(platform, remote_path),
+            build_backup_command(platform),
             timeout=300,
             check=True,
         )
+        remote_path = parse_backup_path(result.stdout or "")
         try:
             async with connection.start_sftp_client() as sftp:
                 await sftp.get(remote_path, str(local_path))
@@ -1185,6 +1220,15 @@ async def backup_configs(
         return local_path
     finally:
         if remote_path:
-            await _run(connection, f"rm -f {remote_path}", timeout=15)
+            # Уборка не должна подменять исходную ошибку своей: если соединение
+            # уже разорвано (например, упала загрузка по SFTP строкой выше),
+            # пользователю нужна настоящая причина сбоя, а не «connection lost»
+            # от попытки удалить временный файл. Сам файл создан mktemp с
+            # правами 600 и принадлежит тому же пользователю, так что штатно
+            # удаление проходит; остаток в /tmp не читается посторонними.
+            try:
+                await _run(connection, f"rm -f {shlex.quote(remote_path)}", timeout=15)
+            except Exception:
+                pass
         connection.close()
         await connection.wait_closed()

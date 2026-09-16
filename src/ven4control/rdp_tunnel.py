@@ -26,6 +26,7 @@ from PySide6.QtCore import QObject, Signal
 
 from ven4control.models import Device
 from ven4control.remote_control import MISSING_FINGERPRINT_MESSAGE, _connect
+from ven4control.windows_identity import mstsc_path
 
 
 # Локальный конец туннеля. Слушаем только петлевой интерфейс: сессия должна
@@ -61,11 +62,22 @@ def mstsc_command(local_port: int) -> list[str]:
 
     Адрес всегда петлевой: обращаться к самому устройству по сети не нужно
     и не следует — весь RDP идёт внутри SSH-канала.
+
+    Путь к `mstsc.exe` резолвится абсолютным: голое имя Windows ищет начиная с
+    каталога процесса, а приложение раздаётся портативным EXE и запускается
+    обычно из «Загрузок». Подменённый `mstsc.exe` получил бы живой локальный
+    конец туннеля к устройству.
     """
     port = int(local_port)
     if not 1 <= port <= 65535:
         raise ValueError("Локальный порт туннеля вне допустимого диапазона")
-    return ["mstsc.exe", f"/v:{LOOPBACK}:{port}"]
+    executable = mstsc_path()
+    if not executable:
+        raise RuntimeError(
+            "Не найден клиент удалённого рабочего стола (mstsc.exe). "
+            "Проверьте, что компонент Windows на месте."
+        )
+    return [executable, f"/v:{LOOPBACK}:{port}"]
 
 
 def closing_message(tunnel: "RdpTunnel") -> str:

@@ -54,6 +54,11 @@ from ven4control.ssh_service import (
 from ven4control.storage import DeviceStorage
 from ven4control.terminal_dialog import TerminalDialog
 from ven4control.theme import apply_theme
+from ven4control.windows_identity import (
+    ssh_path,
+    tailscale_path,
+    windows_terminal_path,
+)
 
 
 def resource_path(name: str) -> Path:
@@ -177,9 +182,15 @@ def needs_key_install(
     return device.auth_type == "password" and install_requested and bool(password)
 
 
-def terminal_command(device: Device) -> list[str]:
-    """Аргументы ssh для запуска терминала к устройству."""
-    args = ["ssh", "-p", str(device.port)]
+def terminal_command(device: Device, executable: str = "") -> list[str]:
+    """Аргументы ssh для запуска терминала к устройству.
+
+    Путь к `ssh.exe` подставляется абсолютным: голое имя Windows ищет начиная
+    с каталога процесса и текущего каталога, а приложение раздаётся портативным
+    EXE, который запускают прямо из «Загрузок». Подменённый там `ssh.exe`
+    получил бы и адрес устройства, и путь к приватному ключу.
+    """
+    args = [executable or "ssh", "-p", str(device.port)]
     if device.auth_type == "key" and device.key_path:
         args += ["-i", device.key_path]
     args.append(f"{device.username}@{device.host}")
@@ -1120,14 +1131,25 @@ class MainWindow(QMainWindow):
         self.pool.start(worker)
 
     def open_terminal(self, device: Device) -> None:
-        args = terminal_command(device)
-        try:
-            subprocess.Popen(
-                ["wt.exe", "new-tab", "--title", terminal_tab_title(device.name), *args]
+        ssh_executable = ssh_path()
+        if not ssh_executable:
+            QMessageBox.warning(
+                self,
+                "Терминал не запущен",
+                "Не найден клиент OpenSSH (ssh.exe). Установите компонент Windows "
+                "«Клиент OpenSSH» или воспользуйтесь встроенным терминалом.",
             )
             return
-        except FileNotFoundError:
-            pass
+        args = terminal_command(device, ssh_executable)
+        terminal = windows_terminal_path()
+        if terminal:
+            try:
+                subprocess.Popen(
+                    [terminal, "new-tab", "--title", terminal_tab_title(device.name), *args]
+                )
+                return
+            except OSError:
+                pass
         try:
             # Windows Terminal не установлен: запускаем ssh в отдельном окне.
             # Передача аргументов в powershell -Command ломала пути с пробелами.
@@ -1647,9 +1669,17 @@ class MainWindow(QMainWindow):
         event.accept()
 
     def import_tailscale(self) -> None:
+        tailscale = tailscale_path()
+        if not tailscale:
+            QMessageBox.information(
+                self,
+                "Tailscale",
+                "Клиент Tailscale не найден. Установите его и повторите импорт.",
+            )
+            return
         try:
             completed = subprocess.run(
-                ["tailscale", "status", "--json"],
+                [tailscale, "status", "--json"],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",

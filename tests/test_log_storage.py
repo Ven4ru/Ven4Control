@@ -5,12 +5,62 @@ from pathlib import Path
 
 from ven4control.log_storage import (
     RawLogWriter,
+    append_text_row,
     export_session,
     safe_name,
     session_base_name,
     session_directory,
     split_timestamp,
 )
+
+
+class XlsxRowTests(unittest.TestCase):
+    """Строки журнала попадают в книгу как текст, а не как формулы.
+
+    Приложение само пишет маркеры вида `=== СНАПШОТ ===` (раз в полминуты),
+    а openpyxl объявляет формулой любое значение, начинающееся с `=`. Книга
+    получалась с несуществующей формулой, и Excel открывал её через диалог
+    восстановления, вычищая записи.
+    """
+
+    def _sheet(self):
+        from openpyxl import Workbook
+
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["Время", "Сообщение"])
+        return workbook, sheet
+
+    def test_snapshot_marker_stays_text(self) -> None:
+        workbook, sheet = self._sheet()
+        append_text_row(sheet, "2026-09-16 07:00:00", "=== СНАПШОТ ===")
+        cell = sheet["B2"]
+        self.assertEqual("s", cell.data_type)
+        self.assertEqual("=== СНАПШОТ ===", cell.value)
+
+    def test_formula_from_the_device_is_not_executable(self) -> None:
+        """Строка с устройства не должна выполняться у того, кому переслали отчёт."""
+        workbook, sheet = self._sheet()
+        append_text_row(sheet, "2026-09-16 07:00:01", '=HYPERLINK("http://x","x")')
+        self.assertEqual("s", sheet["B2"].data_type)
+
+    def test_saved_workbook_contains_no_formulas(self) -> None:
+        import zipfile
+
+        workbook, sheet = self._sheet()
+        append_text_row(sheet, "2026-09-16 07:00:00", "=== ПОДКЛЮЧЕНО к роутеру ===")
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "log.xlsx"
+            workbook.save(target)
+            with zipfile.ZipFile(target) as archive:
+                sheet_xml = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
+        self.assertNotIn("<f>", sheet_xml)
+
+    def test_control_characters_are_stripped(self) -> None:
+        """Управляющие символы из вывода устройства срывали экспорт целиком."""
+        workbook, sheet = self._sheet()
+        append_text_row(sheet, "2026-09-16 07:00:02", "строка\x07с\x00управляющими")
+        self.assertEqual("строкасуправляющими", sheet["B2"].value)
 
 
 class NamingTests(unittest.TestCase):

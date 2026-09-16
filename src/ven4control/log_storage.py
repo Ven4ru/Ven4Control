@@ -232,6 +232,34 @@ def _export_docx(
     return created
 
 
+# Символы, недопустимые в XML книги Excel: openpyxl на них бросает
+# IllegalCharacterError, и экспорт срывается целиком. В журнале они появляются
+# штатно — управляющие последовательности из вывода устройства.
+ILLEGAL_XLSX_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def append_text_row(sheet, stamp: str, message: str) -> None:
+    """Дописывает строку журнала в лист как текст, а не как формулу.
+
+    openpyxl объявляет формулой любое значение длиннее одного символа, которое
+    начинается с `=`. Приложение само пишет в журнал маркеры вида
+    `=== ПОДКЛЮЧЕНО ... ===` и `=== СНАПШОТ ===` (снапшот — раз в полминуты,
+    то есть практически в каждой сессии), поэтому книга получала несуществующую
+    формулу `== СНАПШОТ ===`, и Excel открывал её через диалог восстановления,
+    вычищая записи. Явный тип `s` заодно обезвреживает строку, пришедшую с
+    устройства, — например `=HYPERLINK(...)`, которая иначе выполнилась бы у
+    того, кому переслали отчёт.
+    """
+    row = sheet.max_row + 1
+    for column, value in enumerate((stamp, message), start=1):
+        cell = sheet.cell(row=row, column=column)
+        # Присвоение само выставляет тип и для строки с ведущим `=` выберет
+        # формулу, поэтому тип переопределяется сразу после — запись в файл
+        # идёт уже по нему.
+        cell.value = ILLEGAL_XLSX_CHARS.sub("", value)
+        cell.data_type = "s"
+
+
 def _export_xlsx(
     parts: list[Path],
     destination: Path,
@@ -257,7 +285,7 @@ def _export_xlsx(
 
     for line in _iter_lines(parts):
         stamp, message = split_timestamp(line)
-        sheet.append([stamp, message])
+        append_text_row(sheet, stamp, message)
         rows += 1
         if rows >= max_rows:
             flush()
