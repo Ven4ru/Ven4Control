@@ -22,9 +22,11 @@
 
 Unicode true
 
-!ifndef VERSION
-  !define VERSION "0.6.0"
-!endif
+; Версия приходит из единственной константы проекта: version.nsh генерируется
+; tools/gen_version_info.py из src/ven4control/_version.py. Руками её здесь
+; больше не задают — разошедшийся номер приводил бы к вечному предложению
+; одного и того же обновления.
+!include "version.nsh"
 !ifndef SOURCE_EXE
   !define SOURCE_EXE "..\dist\Ven4Control.exe"
 !endif

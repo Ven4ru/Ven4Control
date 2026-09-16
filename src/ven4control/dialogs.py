@@ -15,6 +15,7 @@ from ven4control.settings import (
     UPDATE_CHECK_DISABLED,
     UPDATE_CHECK_ENABLED,
     AppSettings,
+    load_settings,
     save_settings,
     terminal_palette,
 )
@@ -180,9 +181,6 @@ class SettingsDialog(QDialog):
         self.resize(380, 480)
         self.selected_theme = settings.theme
         self.selected_terminal_theme = settings.terminal_theme
-        # Исходные настройки целиком: _save переносит из них поля, которыми
-        # диалог не управляет.
-        self._settings = settings
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("Тема интерфейса"))
@@ -295,13 +293,17 @@ class SettingsDialog(QDialog):
         set_terminal_colors(palette["content_background"], palette["text_primary"])
 
     def _save(self) -> None:
-        # replace, а не новый AppSettings: диалог правит только то, чем
-        # управляет, а остальные поля переносит как есть. Со сборкой объекта
-        # с нуля смена темы затирала бы согласие на проверку обновлений и
-        # отметку времени, и то же повторилось бы с любым новым полем.
+        # Настройки перечитываются с диска, а не берутся из снимка, сделанного
+        # при открытии диалога. Пока диалог открыт, их успевает изменить кто-то
+        # ещё: проверка обновлений пишет отметку времени, а вопрос о согласии
+        # при запуске — само согласие. Со старым снимком следующий клик по теме
+        # вернул бы затёртые значения обратно.
+        #
+        # replace, а не новый AppSettings: диалог трогает только свои поля, а
+        # остальные переносит как есть — включая те, которых здесь ещё нет.
         save_settings(
             replace(
-                self._settings,
+                load_settings(),
                 theme=self.selected_theme,
                 terminal_theme=self.selected_terminal_theme,
                 update_check=self.selected_update_check,

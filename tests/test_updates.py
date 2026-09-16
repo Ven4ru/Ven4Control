@@ -130,6 +130,53 @@ class SelectUpdateTests(unittest.TestCase):
         self.assertIsNone(select_update({}, "0.5.0"))
 
 
+class InstallerNamingTests(unittest.TestCase):
+    """Имя ассета релиза обязано совпадать с тем, что ищет приложение.
+
+    Теги релизов идут с суффиксом (`v0.5.0-beta`), и собрать установщик как
+    `Ven4Control.Setup-0.5.0-beta.exe` — естественная ошибка. Такое имя шаблон
+    не примет, и самообновление молча не сработает никогда: пользователь будет
+    видеть «Обновлений не найдено» без единого намёка на причину.
+    """
+
+    def test_name_built_from_the_project_version_matches(self) -> None:
+        from ven4control.updates import INSTALLER_PATTERN
+        from ven4control._version import __version__
+
+        self.assertRegex(__version__, r"^\d+\.\d+\.\d+$")
+        self.assertIsNotNone(
+            INSTALLER_PATTERN.match(f"Ven4Control.Setup-{__version__}.exe")
+        )
+
+    def test_name_with_a_release_suffix_is_rejected(self) -> None:
+        from ven4control.updates import INSTALLER_PATTERN
+
+        self.assertIsNone(
+            INSTALLER_PATTERN.match("Ven4Control.Setup-0.6.0-beta.exe")
+        )
+
+    def test_generated_installer_version_matches_the_constant(self) -> None:
+        """installer/version.nsh генерируется из той же константы.
+
+        Расхождение означало бы установщик, который ставит код одной версии
+        под именем другой, — и приложение предлагало бы то же обновление
+        бесконечно.
+        """
+        import pathlib
+        import re as regex
+
+        from ven4control._version import __version__
+
+        nsh = (
+            pathlib.Path(__file__).resolve().parent.parent
+            / "installer"
+            / "version.nsh"
+        )
+        match = regex.search(r'!define VERSION "([^"]+)"', nsh.read_text(encoding="utf-8"))
+        self.assertIsNotNone(match, "version.nsh не сгенерирован")
+        self.assertEqual(__version__, match.group(1))
+
+
 class InstallationKindTests(unittest.TestCase):
     def test_exe_inside_registered_directory_is_installed(self) -> None:
         self.assertTrue(
@@ -217,6 +264,18 @@ class ShouldCheckTests(unittest.TestCase):
         now = datetime(2026, 9, 16, 12, 0, 0)
         old = (now - timedelta(hours=25)).isoformat()
         self.assertTrue(should_check(self._settings(UPDATE_CHECK_ENABLED, old), now))
+
+    def test_timestamp_from_the_future_does_not_block_checking(self) -> None:
+        """Часы могли уйти вперёд или их перевели назад.
+
+        Без этого разница получалась отрицательной, и проверка блокировалась,
+        пока реальное время не догонит записанное, — это могут быть месяцы.
+        """
+        from ven4control.settings import UPDATE_CHECK_ENABLED
+
+        now = datetime(2026, 9, 16, 12, 0, 0)
+        future = (now + timedelta(days=40)).isoformat()
+        self.assertTrue(should_check(self._settings(UPDATE_CHECK_ENABLED, future), now))
 
     def test_corrupt_timestamp_does_not_block_checking(self) -> None:
         from ven4control.settings import UPDATE_CHECK_ENABLED

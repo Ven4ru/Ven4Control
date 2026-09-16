@@ -111,14 +111,19 @@ def select_update(release: dict, current_version: str) -> UpdateInfo | None:
 
     parsed = parse_release_tag(tag)
     assert parsed is not None  # is_newer выше уже разобрал тег
+    # Адрес страницы уходит в webbrowser.open, а тот отдаёт его обработчику
+    # схемы в системе. Проверяется так же строго, как ссылка на скачивание:
+    # доверять полю ответа только потому, что оно пришло по TLS, незачем.
     page_url = release.get("html_url")
+    if not isinstance(page_url, str) or not page_url.startswith("https://"):
+        page_url = ""
     return UpdateInfo(
         version=".".join(str(part) for part in parsed),
         tag=tag,
         asset_name=asset["name"],
         download_url=url,
         sha256=sha256,
-        page_url=page_url if isinstance(page_url, str) else "",
+        page_url=page_url,
     )
 
 
@@ -188,6 +193,12 @@ def should_check(settings: AppSettings, now: datetime) -> bool:
         last = datetime.fromisoformat(settings.update_last_check)
     except ValueError:
         return True
+    if last > now:
+        # Отметка из будущего: часы уходили вперёд или их перевели назад
+        # (севшая батарейка CMOS, правка часового пояса). Иначе проверка
+        # заблокировалась бы до тех пор, пока реальное время не догонит
+        # записанное, — это могут быть месяцы.
+        return True
     return now - last >= timedelta(hours=CHECK_INTERVAL_HOURS)
 
 
@@ -199,6 +210,8 @@ RELEASES_PAGE_URL = f"https://github.com/{REPO}/releases"
 USER_AGENT = f"Ven4Control/{__version__}"
 
 DOWNLOAD_CHUNK = 256 * 1024
+
+DOWNLOAD_DIR_PREFIX = "ven4control_update_"
 
 
 class UpdateCheckError(Exception):
@@ -262,7 +275,7 @@ def download_installer(update: UpdateInfo, timeout: float = 300.0) -> pathlib.Pa
     позволяет подменить цель. Не совпал хеш — файл удаляется и обновление
     отменяется, «попробовать ещё раз» здесь неуместно.
     """
-    directory = pathlib.Path(tempfile.mkdtemp(prefix="ven4control_update_"))
+    directory = pathlib.Path(tempfile.mkdtemp(prefix=DOWNLOAD_DIR_PREFIX))
     target = directory / update.asset_name
     request = urllib.request.Request(
         update.download_url, headers={"User-Agent": USER_AGENT}
@@ -282,3 +295,22 @@ def download_installer(update: UpdateInfo, timeout: float = 300.0) -> pathlib.Pa
             "Контрольная сумма скачанного файла не совпала — обновление отменено"
         )
     return target
+
+
+def cleanup_stale_downloads() -> None:
+    """Убирает установщики, оставшиеся от прошлых обновлений.
+
+    На успешном пути удалить их в момент обновления некому: приложение
+    запускает установщик и сразу выходит, поэтому каталог с файлом на ~60 МБ
+    оставался бы во временной папке навсегда, по одному на каждое обновление.
+    Уборка делается при следующем запуске — к этому моменту установщик своё
+    уже отработал.
+    """
+    root = pathlib.Path(tempfile.gettempdir())
+    try:
+        candidates = list(root.glob(f"{DOWNLOAD_DIR_PREFIX}*"))
+    except OSError:
+        return
+    for directory in candidates:
+        if directory.is_dir():
+            shutil.rmtree(directory, ignore_errors=True)

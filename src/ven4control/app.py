@@ -67,6 +67,7 @@ from ven4control.theme import apply_theme
 from ven4control.updates import (
     RELEASES_PAGE_URL,
     check_for_update,
+    cleanup_stale_downloads,
     download_installer,
     is_installed_copy,
     should_check,
@@ -433,6 +434,9 @@ class MainWindow(QMainWindow):
         self.tunnels.status_changed.connect(self._tunnel_status_changed)
         self.tunnels.tunnel_closed.connect(self._tunnel_closed)
         self.tray: QSystemTrayIcon | None = None
+        # Одна проверка/загрузка обновления за раз: иначе двойной клик даёт
+        # две загрузки по 60 МБ и два установщика в один каталог.
+        self._update_busy = False
         self._quitting = False
         self._tray_hint_shown = False
         self.pool = QThreadPool.globalInstance()
@@ -620,6 +624,14 @@ class MainWindow(QMainWindow):
 
     def maybe_check_updates_on_start(self) -> None:
         """Согласие спрашивается один раз, проверка — не чаще раза в сутки."""
+        # Установщики от прошлых обновлений удалить было некому: приложение
+        # запускает установщик и выходит. Убираем при следующем запуске.
+        cleanup_stale_downloads()
+        if not self.isVisible():
+            # Автозапуск в трей: окна на экране нет, и модальный вопрос о
+            # согласии выскочил бы поверх чужого рабочего стола через пару
+            # секунд после входа в систему. Спросим, когда человек откроет окно.
+            return
         settings = load_settings()
         if settings.update_check == UPDATE_CHECK_UNKNOWN:
             answer = QMessageBox.question(
@@ -643,6 +655,12 @@ class MainWindow(QMainWindow):
 
     def check_updates(self, manual: bool = False) -> None:
         """Проверка идёт в рабочем потоке: в UI-потоке окно бы замёрзло."""
+        if self._update_busy:
+            # Без этого двойной клик по «Проверить сейчас» даёт две проверки,
+            # два диалога и — при согласии в обоих — две загрузки по 60 МБ и
+            # два установщика, нацеленных в один каталог.
+            return
+        self._update_busy = True
         worker = Worker(check_for_update, __version__)
         worker.signals.finished.connect(
             lambda result: self._updates_checked(result, manual)
@@ -655,6 +673,7 @@ class MainWindow(QMainWindow):
         settings.update_last_check = datetime.now().isoformat(timespec="seconds")
         save_settings(settings)
         if update is None:
+            self._update_busy = False
             if manual:
                 # Намеренно нейтральная формулировка: обновление не предлагается
                 # и когда версия актуальна, и когда в релизе не нашлось
@@ -663,24 +682,31 @@ class MainWindow(QMainWindow):
                 # неправдой.
                 device_information(self, "Обновления", "Обновлений не найдено.")
             return
-        if manual:
-            self._offer_update(update)
-        elif self.tray is not None:
+        if not manual and self.tray is not None:
+            # Автоматическая проверка не лезет диалогом поверх работы.
+            self._update_busy = False
             self.tray.showMessage(
                 "Ven4Control",
                 f"Доступна версия {update.version}. Откройте «Настройки», "
                 "чтобы обновиться.",
             )
+            return
+        # Ручная проверка — и автоматическая, когда трея нет вовсе: иначе
+        # найденное обновление было бы потеряно молча, а сутки в счётчике
+        # уже израсходованы, и так повторялось бы бесконечно.
+        self._offer_update(update)
 
     def _updates_failed(self, error: str, manual: bool) -> None:
         # Отметка времени не двигается: неудачная проверка не считается
         # состоявшейся, иначе машина без сети замолчала бы на сутки.
+        self._update_busy = False
         if manual:
             device_warning(self, "Обновления", error)
 
     def _offer_update(self, update) -> None:
         """Портативную копию не трогаем: она ничего не прописывает в систему."""
         if not is_installed_copy():
+            self._update_busy = False
             device_information(
                 self,
                 "Доступна новая версия",
@@ -690,12 +716,21 @@ class MainWindow(QMainWindow):
             webbrowser.open(update.page_url or RELEASES_PAGE_URL)
             return
 
-        active = session_manager().active_count()
-        warning = ""
+        # Считаются и RDP-туннели: обновление закрывает приложение целиком,
+        # а не только сессии логирования, и умолчать об обрыве открытого
+        # удалённого рабочего стола было бы нечестно.
+        active = self.sessions.active_count()
+        tunnels = self.tunnels.active_count()
+        parts = []
         if active:
+            parts.append(f"фоновых сессий логирования: {active}")
+        if tunnels:
+            parts.append(f"RDP-сессий: {tunnels}")
+        warning = ""
+        if parts:
             warning = (
-                f"\n\nСейчас работают фоновые сессии логирования: {active}. "
-                "Они прервутся и поднимутся после перезапуска, в журнале "
+                f"\n\nСейчас работают {', '.join(parts)}. Они будут закрыты; "
+                "сессии логирования поднимутся после перезапуска, в журнале "
                 "останется разрыв."
             )
         answer = QMessageBox.question(
@@ -709,14 +744,18 @@ class MainWindow(QMainWindow):
         )
         if answer == QMessageBox.StandardButton.Yes:
             self._apply_update(update)
+        else:
+            self._update_busy = False
 
     def _apply_update(self, update) -> None:
         worker = Worker(download_installer, update)
         worker.signals.finished.connect(self._run_installer)
-        worker.signals.failed.connect(
-            lambda error: device_warning(self, "Обновление не выполнено", error)
-        )
+        worker.signals.failed.connect(self._download_failed)
         self._start_worker(worker)
+
+    def _download_failed(self, error: str) -> None:
+        self._update_busy = False
+        device_warning(self, "Обновление не выполнено", error)
 
     def _run_installer(self, installer_path) -> None:
         """Выходим только убедившись, что установщик реально стартовал.
@@ -729,14 +768,14 @@ class MainWindow(QMainWindow):
                 [str(installer_path), "/S", f"/WAITPID={os.getpid()}", "/RELAUNCH"]
             )
         except OSError as error:
+            self._update_busy = False
             device_warning(
                 self,
                 "Обновление не выполнено",
                 f"Не удалось запустить установщик: {error}",
             )
             return
-        self.sessions.stop_all()
-        QApplication.quit()
+        self.shutdown_and_quit()
 
     def _update_status_pill(self) -> None:
         online = sum(
@@ -939,6 +978,17 @@ class MainWindow(QMainWindow):
             )
             if answer != QMessageBox.StandardButton.Yes:
                 return
+        self.shutdown_and_quit()
+
+    def shutdown_and_quit(self) -> None:
+        """Единственный путь завершения приложения.
+
+        Через closeEvent он дожидается пула задач и корректно закрывает
+        RDP-туннели и фоновые сессии. QApplication.quit() сам по себе события
+        закрытия не доставляет, поэтому в обход этого метода туннели
+        обрывались бы вместе с процессом, а значок так и остался бы висеть
+        в области уведомлений.
+        """
         self._quitting = True
         if self.tray is not None:
             self.tray.hide()
