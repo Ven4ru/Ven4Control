@@ -9,7 +9,14 @@ a = Analysis(
     ["src/ven4control/app.py"],
     pathex=["src"],
     binaries=[],
-    datas=[("assets/ven4control.ico", ".")] + collect_data_files("docx"),
+    # Уведомление о лицензиях сторонних компонентов обязано ехать вместе с
+    # бинарником: внутрь onefile попадают Qt/PySide6 (LGPL-3.0) и asyncssh
+    # (EPL-2.0), а их условия требуют уведомить получателя сборки.
+    datas=[
+        ("assets/ven4control.ico", "."),
+        ("THIRD-PARTY-NOTICES.md", "."),
+    ]
+    + collect_data_files("docx"),
     hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},
