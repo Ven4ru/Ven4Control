@@ -13,6 +13,48 @@ from ven4control.settings import (
 from ven4control.theme import DEFAULT_THEME, THEME_LIGHT, build_palette
 
 
+class UpdateConsentTests(unittest.TestCase):
+    def test_new_installation_has_not_been_asked_yet(self) -> None:
+        from ven4control.settings import UPDATE_CHECK_UNKNOWN
+
+        self.assertEqual(UPDATE_CHECK_UNKNOWN, AppSettings().update_check)
+
+    def test_settings_saved_before_this_feature_are_read_as_not_asked(self) -> None:
+        """У тех, кто обновляется с прежних версий, ключа в файле нет."""
+        from ven4control.settings import UPDATE_CHECK_UNKNOWN
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            path.write_text('{"theme": "dark"}', encoding="utf-8")
+            loaded = load_settings(path)
+            self.assertEqual(UPDATE_CHECK_UNKNOWN, loaded.update_check)
+            self.assertEqual("", loaded.update_last_check)
+
+    def test_consent_and_timestamp_survive_a_round_trip(self) -> None:
+        from ven4control.settings import UPDATE_CHECK_ENABLED
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            save_settings(
+                AppSettings(
+                    update_check=UPDATE_CHECK_ENABLED,
+                    update_last_check="2026-09-16T10:00:00",
+                ),
+                path,
+            )
+            loaded = load_settings(path)
+            self.assertEqual(UPDATE_CHECK_ENABLED, loaded.update_check)
+            self.assertEqual("2026-09-16T10:00:00", loaded.update_last_check)
+
+    def test_unknown_value_in_file_falls_back_to_not_asked(self) -> None:
+        from ven4control.settings import UPDATE_CHECK_UNKNOWN
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            path.write_text('{"update_check": "может быть"}', encoding="utf-8")
+            self.assertEqual(UPDATE_CHECK_UNKNOWN, load_settings(path).update_check)
+
+
 class SettingsRoundTripTests(unittest.TestCase):
     def test_saved_theme_is_read_back(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

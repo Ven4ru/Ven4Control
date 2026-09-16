@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime, timedelta
 from unittest import mock
 
 from ven4control.updates import (
@@ -7,6 +8,7 @@ from ven4control.updates import (
     is_newer,
     parse_release_tag,
     select_update,
+    should_check,
 )
 
 
@@ -168,6 +170,59 @@ class InstallationKindTests(unittest.TestCase):
                     )
                 )
             )
+
+
+class ShouldCheckTests(unittest.TestCase):
+    def _settings(self, consent: str, last: str = ""):
+        from ven4control.settings import AppSettings
+
+        return AppSettings(update_check=consent, update_last_check=last)
+
+    def test_no_check_until_the_question_is_answered(self) -> None:
+        from ven4control.settings import UPDATE_CHECK_UNKNOWN
+
+        self.assertFalse(
+            should_check(self._settings(UPDATE_CHECK_UNKNOWN), datetime(2026, 9, 16))
+        )
+
+    def test_no_check_when_refused(self) -> None:
+        from ven4control.settings import UPDATE_CHECK_DISABLED
+
+        self.assertFalse(
+            should_check(self._settings(UPDATE_CHECK_DISABLED), datetime(2026, 9, 16))
+        )
+
+    def test_first_check_after_consent(self) -> None:
+        from ven4control.settings import UPDATE_CHECK_ENABLED
+
+        self.assertTrue(
+            should_check(self._settings(UPDATE_CHECK_ENABLED), datetime(2026, 9, 16))
+        )
+
+    def test_not_more_often_than_once_a_day(self) -> None:
+        from ven4control.settings import UPDATE_CHECK_ENABLED
+
+        now = datetime(2026, 9, 16, 12, 0, 0)
+        recent = (now - timedelta(hours=3)).isoformat()
+        self.assertFalse(
+            should_check(self._settings(UPDATE_CHECK_ENABLED, recent), now)
+        )
+
+    def test_checks_again_after_a_day(self) -> None:
+        from ven4control.settings import UPDATE_CHECK_ENABLED
+
+        now = datetime(2026, 9, 16, 12, 0, 0)
+        old = (now - timedelta(hours=25)).isoformat()
+        self.assertTrue(should_check(self._settings(UPDATE_CHECK_ENABLED, old), now))
+
+    def test_corrupt_timestamp_does_not_block_checking(self) -> None:
+        from ven4control.settings import UPDATE_CHECK_ENABLED
+
+        self.assertTrue(
+            should_check(
+                self._settings(UPDATE_CHECK_ENABLED, "позавчера"), datetime(2026, 9, 16)
+            )
+        )
 
 
 if __name__ == "__main__":

@@ -13,6 +13,9 @@ import os
 import re
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timedelta
+
+from ven4control.settings import UPDATE_CHECK_ENABLED, AppSettings
 
 # Теги релизов исторически разной формы: v0.4-beta, v0.4.1-beta, v0.5.0-beta.
 # Недостающие части считаем нулями, иначе 0.4 и 0.4.0 сравнивались бы как
@@ -156,3 +159,25 @@ def is_installed_copy(
     if not target:
         return False
     return _same_dir(os.path.dirname(exe), target)
+
+
+CHECK_INTERVAL_HOURS = 24
+
+
+def should_check(settings: AppSettings, now: datetime) -> bool:
+    """Пора ли автоматически проверять обновления.
+
+    Отметка времени двигается только при успешном ответе (см. вызывающий код),
+    поэтому машина, простоявшая сутки без сети, попробует снова при следующем
+    запуске, а не сочтёт проверку состоявшейся. Испорченная отметка тоже не
+    должна блокировать проверку навсегда.
+    """
+    if settings.update_check != UPDATE_CHECK_ENABLED:
+        return False
+    if not settings.update_last_check:
+        return True
+    try:
+        last = datetime.fromisoformat(settings.update_last_check)
+    except ValueError:
+        return True
+    return now - last >= timedelta(hours=CHECK_INTERVAL_HOURS)

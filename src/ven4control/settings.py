@@ -20,11 +20,20 @@ SETTINGS_PATH = APP_DIR / "settings.json"
 # делает его явным и переопределяемым, а не единственным поведением.
 TERMINAL_THEME_SYNC = "sync"
 
+# Проверка обновлений — единственное обращение приложения наружу, поэтому она
+# включается только с явного согласия. "unknown" означает, что вопрос ещё не
+# задавали: у тех, кто обновляется с прежних версий, ключа в файле нет.
+UPDATE_CHECK_UNKNOWN = "unknown"
+UPDATE_CHECK_ENABLED = "enabled"
+UPDATE_CHECK_DISABLED = "disabled"
+
 
 @dataclass(slots=True)
 class AppSettings:
     theme: str = DEFAULT_THEME
     terminal_theme: str = TERMINAL_THEME_SYNC
+    update_check: str = UPDATE_CHECK_UNKNOWN
+    update_last_check: str = ""
 
 
 def load_settings(path: Path = SETTINGS_PATH) -> AppSettings:
@@ -44,10 +53,21 @@ def load_settings(path: Path = SETTINGS_PATH) -> AppSettings:
         return AppSettings()
     theme = raw.get("theme")
     terminal_theme = raw.get("terminal_theme")
+    update_check = raw.get("update_check")
+    update_last_check = raw.get("update_last_check")
     return AppSettings(
         theme=theme if isinstance(theme, str) else DEFAULT_THEME,
         terminal_theme=(
             terminal_theme if isinstance(terminal_theme, str) else TERMINAL_THEME_SYNC
+        ),
+        update_check=(
+            update_check
+            if update_check
+            in (UPDATE_CHECK_UNKNOWN, UPDATE_CHECK_ENABLED, UPDATE_CHECK_DISABLED)
+            else UPDATE_CHECK_UNKNOWN
+        ),
+        update_last_check=(
+            update_last_check if isinstance(update_last_check, str) else ""
         ),
     )
 
