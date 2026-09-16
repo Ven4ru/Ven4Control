@@ -1,6 +1,3 @@
-from importlib.metadata import PackageNotFoundError, version
+from ven4control._version import __version__
 
-try:
-    __version__ = version("ven4control")
-except PackageNotFoundError:
-    __version__ = "0.0.0"
+__all__ = ["__version__"]
