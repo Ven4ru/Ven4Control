@@ -22,9 +22,11 @@
 
 Unicode true
 
-!ifndef VERSION
-  !define VERSION "0.6.0"
-!endif
+; Версия приходит из единственной константы проекта: version.nsh генерируется
+; tools/gen_version_info.py из src/ven4control/_version.py. Руками её здесь
+; больше не задают — разошедшийся номер приводил бы к вечному предложению
+; одного и того же обновления.
+!include "version.nsh"
 !ifndef SOURCE_EXE
   !define SOURCE_EXE "..\dist\Ven4Control.exe"
 !endif
@@ -78,6 +80,36 @@ VIAddVersionKey /LANG=1049 "LegalCopyright"  "${PUBLISHER}"
 !insertmacro MUI_LANGUAGE "Russian"
 
 
+Var WaitPid
+Var Relaunch
+
+; Самообновление: приложение запускает установщик и сразу выходит, поэтому
+; установщик обязан дождаться исчезновения процесса — пока exe занят, заменить
+; его нельзя, — и поднять приложение обратно после замены. При обычной
+; установке приложение поднимает финишная страница, но в тихом режиме её нет.
+Function .onInit
+  ${GetParameters} $R0
+  ClearErrors
+  ${GetOptions} $R0 "/WAITPID=" $WaitPid
+  IfErrors 0 +2
+    StrCpy $WaitPid ""
+  ClearErrors
+  ${GetOptions} $R0 "/RELAUNCH" $R1
+  IfErrors +2
+    StrCpy $Relaunch "1"
+FunctionEnd
+
+Function WaitForCaller
+  StrCmp $WaitPid "" done
+  ; SYNCHRONIZE = 0x00100000
+  System::Call 'kernel32::OpenProcess(i 0x00100000, i 0, i $WaitPid) i .r9'
+  IntCmp $9 0 done
+  System::Call 'kernel32::WaitForSingleObject(i r9, i 60000)'
+  System::Call 'kernel32::CloseHandle(i r9)'
+  done:
+FunctionEnd
+
+
 ; Закрывает работающее приложение: пока его EXE открыт, файл заменить нельзя.
 ; Сначала вежливо, и только потом принудительно — у Ven4Control могут быть
 ; живые фоновые сессии логирования, которым лучше завершиться самим.
@@ -103,6 +135,7 @@ FunctionEnd
 Section "Ven4Control" SecMain
   SectionIn RO
 
+  Call WaitForCaller
   Call CloseRunningApp
 
   SetOutPath "$INSTDIR"
@@ -143,6 +176,11 @@ Section "Ven4Control" SecMain
   WriteRegDWORD HKCU "${UNINST_KEY}" "EstimatedSize"        "$0"
   WriteRegDWORD HKCU "${UNINST_KEY}" "NoModify"             1
   WriteRegDWORD HKCU "${UNINST_KEY}" "NoRepair"             1
+
+  ; Перезапуск только при самообновлении: при обычной установке приложение
+  ; поднимает финишная страница, а в тихом режиме её нет.
+  StrCmp $Relaunch "1" 0 +2
+    Exec '"$INSTDIR\${EXE_NAME}"'
 SectionEnd
 
 
