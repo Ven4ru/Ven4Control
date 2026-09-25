@@ -61,7 +61,7 @@ class FakeConnection:
         self.commands: list[str] = []
         self.closed = False
 
-    async def run(self, command: str, check: bool = False, timeout: int = 60):
+    async def run(self, command: str, check: bool = False, timeout: int = 60, **options):
         self.commands.append(command)
         for marker, stdout, status in self.replies:
             if marker in command:
@@ -249,6 +249,52 @@ class WindowsGuardTests(unittest.TestCase):
         )
         with patched_connect(connection):
             self.assertIn("строка журнала", asyncio.run(read_logs(device(), {}, "system")))
+
+
+class BackupConnection(FakeConnection):
+    """Соединение с SFTP-клиентом, записывающим «скачанный» архив."""
+
+    def __init__(self, replies: list[tuple[str, str, int]]) -> None:
+        super().__init__(replies)
+        self.downloads: list[str] = []
+
+    def start_sftp_client(self):
+        connection = self
+
+        class Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_exception) -> bool:
+                return False
+
+            async def get(self, _remote: str, local: str) -> None:
+                connection.downloads.append(local)
+                Path(local).write_bytes(b"archive")
+
+        return Client()
+
+
+class BackupDestinationTests(unittest.TestCase):
+    """Ответ устройства не должен задавать путь локального файла."""
+
+    def test_platform_answer_cannot_escape_the_backup_folder(self) -> None:
+        connection = BackupConnection(
+            [
+                ("$PSVersionTable", *SHELL_SYNTAX_ERROR),
+                ("openwrt_release", "../../escaped\\..\\x\nLinux\n", 0),
+                ("mktemp", "/tmp/ven4control-backup-abc123\n", 0),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "backups"
+            with patched_connect(connection):
+                saved = asyncio.run(backup_configs(device(), {}, destination))
+            self.assertEqual(destination.resolve(), saved.resolve().parent)
+            self.assertEqual([str(saved)], connection.downloads)
+            self.assertEqual(
+                [saved.name], [item.name for item in destination.iterdir()]
+            )
 
 
 class RdpStateParsingTests(unittest.TestCase):
@@ -939,8 +985,30 @@ class FailingConnection:
         self.stderr = stderr
         self.status = status
 
-    async def run(self, command: str, check: bool = False, timeout: int = 60):
+    async def run(self, command: str, check: bool = False, timeout: int = 60, **options):
         return SimpleNamespace(stdout="", stderr=self.stderr, exit_status=self.status)
+
+
+class RecordingConnection:
+    """Соединение, запоминающее параметры вызова `run`."""
+
+    def __init__(self) -> None:
+        self.options: dict[str, object] = {}
+
+    async def run(self, command: str, **options):
+        self.options = options
+        return SimpleNamespace(stdout="", stderr="", exit_status=0)
+
+
+class OutputDecodingTests(unittest.TestCase):
+    """Байт не в UTF-8 в выводе устройства не должен рвать соединение."""
+
+    def test_invalid_utf8_is_replaced_not_fatal(self) -> None:
+        # При строгом декодировании asyncssh закрывает всё соединение как
+        # ошибку протокола, а команда возвращает пустой вывод.
+        connection = RecordingConnection()
+        asyncio.run(_run(connection, "logread | tail -n 20"))
+        self.assertEqual("replace", connection.options.get("errors"))
 
 
 class SudoErrorTests(unittest.TestCase):

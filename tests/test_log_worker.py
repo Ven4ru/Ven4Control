@@ -186,9 +186,10 @@ class FakeConnection:
         self.platform = platform
         self.keep_open = keep_open
         self.commands: list[str] = []
+        self.process_options: list[dict[str, object]] = []
         self.closed = False
 
-    async def run(self, command: str, check: bool = False, timeout: int = 60):
+    async def run(self, command: str, check: bool = False, timeout: int = 60, **options):
         self.commands.append(command)
         if "$PSVersionTable" in command:
             if self.platform == "windows":
@@ -203,8 +204,9 @@ class FakeConnection:
             )
         return SimpleNamespace(stdout=SNAPSHOT_OUTPUT, stderr="", exit_status=0)
 
-    def create_process(self, command: str) -> FakeProcess:
+    def create_process(self, command: str, **options) -> FakeProcess:
         self.commands.append(command)
+        self.process_options.append(options)
         return FakeProcess(FakeStdout(self.lines, self.keep_open))
 
     def close(self) -> None:
@@ -278,6 +280,21 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
 
         streams = [item for item in connection.commands if "journalctl -f" in item]
         self.assertTrue(streams, connection.commands)
+
+    async def test_stream_replaces_invalid_utf8_instead_of_failing(self) -> None:
+        """Строгое декодирование рвало бы соединение на бинарной строке журнала."""
+        writer = FakeWriter()
+        connection = FakeConnection(["строка\n"])
+        connect, _ = connect_sequence([connection])
+        worker = self._worker(writer, connect)
+        task = asyncio.create_task(worker.run())
+
+        await self._wait_for(writer, "строка")
+        await self._stop(worker, task)
+
+        self.assertTrue(connection.process_options)
+        for options in connection.process_options:
+            self.assertEqual("replace", options.get("errors"))
 
     async def test_broken_connection_is_restored(self) -> None:
         writer = FakeWriter()

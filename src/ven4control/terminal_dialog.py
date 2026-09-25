@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 
 from ven4control import ansi_screen
 from ven4control.ansi_screen import TerminalScreen, terminal_size
+from ven4control.message_box import device_heading
 from ven4control.models import Device
 from ven4control.terminal_session import (
     STATUS_ACTIVE,
@@ -241,11 +242,7 @@ class TerminalDialog(QDialog):
         buttons.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(
-            QLabel(
-                f"<b>{device.name}</b> — {device.username}@{device.host}:{device.port}"
-            )
-        )
+        layout.addWidget(QLabel(device_heading(device)))
         layout.addWidget(self.view, 1)
         layout.addWidget(self.status)
         layout.addWidget(buttons)
