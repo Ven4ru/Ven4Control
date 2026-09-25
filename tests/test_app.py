@@ -40,7 +40,7 @@ from ven4control.rdp_tunnel import (
     STATUS_STARTING,
     RdpTunnel,
 )
-from ven4control.remote_control import MISSING_FINGERPRINT_MESSAGE
+from ven4control.remote_control import MISSING_FINGERPRINT_MESSAGE, RdpStatus
 from ven4control.sftp_session import SftpSession
 from ven4control.storage import DeviceStorage
 from ven4control.terminal_session import TerminalSession
@@ -369,6 +369,31 @@ class RdpPanelStateTests(unittest.TestCase):
         device = self._device()
         apply_rdp_result(device, True)
         self.assertEqual(RDP_UNSUPPORTED, rdp_state(device, "openwrt"))
+
+
+class RdpNotApplicableMessageTests(unittest.TestCase):
+    """Описание системы приходит с устройства: разметкой его читать нельзя."""
+
+    def test_description_goes_through_the_plain_text_dialog(self) -> None:
+        application()
+        window = MainWindow.__new__(MainWindow)
+        device = Device(5, "Роутер", "192.168.1.1", 22, "root", rdp_checked=True)
+        window.rdp_checking = {5}
+        window.rdp_platforms = {}
+        window.status_generation = 0
+        window.devices = [device]
+        window._update_selection = lambda: None
+        static_box = FakeMessageBox()
+        plain_box = FakeMessageBox()
+        description = '<img src="file://evil/share/a.png">'
+        with (
+            patch("ven4control.app.QMessageBox", static_box),
+            patch("ven4control.app.device_information", plain_box.information),
+        ):
+            window._set_rdp_result(5, 0, RdpStatus("linux", description, False))
+
+        self.assertEqual([], static_box.shown)
+        self.assertIn(description, plain_box.texts())
 
 
 class RdpCellTests(unittest.TestCase):

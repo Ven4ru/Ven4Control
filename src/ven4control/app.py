@@ -1510,7 +1510,9 @@ class MainWindow(QMainWindow):
                 )
         self._update_selection()
         if not status.supported:
-            QMessageBox.information(
+            # Описание системы — ответ самого устройства (PRETTY_NAME и т. п.):
+            # статический QMessageBox отрисовал бы в нём разметку.
+            device_information(
                 self,
                 "RDP неприменим",
                 f"Устройство определено как {status.description} "
