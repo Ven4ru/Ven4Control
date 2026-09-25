@@ -1208,8 +1208,12 @@ async def backup_configs(
         platform, _ = await _reject_windows(connection)
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", device.name).strip("_") or "device"
+        # Платформа — первая строка ответа самого устройства, а не одно из
+        # известных значений: подменённое устройство ответило бы `../../…`,
+        # и архив с его содержимым лёг бы вне папки резервных копий.
+        safe_platform = re.sub(r"[^A-Za-z0-9_.-]+", "_", platform).strip("_") or "unknown"
         destination.mkdir(parents=True, exist_ok=True)
-        local_path = destination / f"{safe_name}-{platform}-{stamp}.tar.gz"
+        local_path = destination / f"{safe_name}-{safe_platform}-{stamp}.tar.gz"
         result = await _run(
             connection,
             build_backup_command(platform),
