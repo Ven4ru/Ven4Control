@@ -55,7 +55,9 @@ from ven4control.remote_control import (
     update_packages,
 )
 from ven4control.message_box import (
+    append_device_line,
     device_critical,
+    device_heading,
     device_information,
     device_warning,
 )
@@ -144,10 +146,11 @@ class DeviceControlDialog(QDialog):
         self.setWindowTitle(f"Управление — {device.name}")
         self.resize(900, 650)
 
-        title = QLabel(
-            f"<b>{device.name}</b> — {device.username}@{device.host}:{device.port}"
-        )
+        title = QLabel(device_heading(device))
         self.status = QLabel("Готово")
+        # В строку состояния попадают имена пакетов и сервисов с устройства:
+        # как разметку их читать нельзя.
+        self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.pages = QStackedWidget()
         nav_panel = QWidget()
         nav_panel.setObjectName("dialogNav")
@@ -220,6 +223,9 @@ class DeviceControlDialog(QDialog):
         for key, caption in fields:
             label = QLabel("—")
             label.setWordWrap(True)
+            # Значения — вывод команд устройства (описание системы,
+            # предупреждения Tailscale, имена интерфейсов WireGuard).
+            label.setTextFormat(Qt.TextFormat.PlainText)
             self.overview_labels[key] = label
             form.addRow(f"{caption}:", label)
         refresh = QPushButton("Обновить показатели")
@@ -371,7 +377,7 @@ class DeviceControlDialog(QDialog):
     def _background_line(self, device_id: int, text: str) -> None:
         if device_id != self.device.id:
             return
-        self.background_output.append(text)
+        append_device_line(self.background_output, text)
         document = self.background_output.document()
         # Живой просмотр не должен расти бесконечно: журнал целиком лежит
         # в файле сессии.

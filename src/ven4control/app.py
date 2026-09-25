@@ -517,6 +517,8 @@ class MainWindow(QMainWindow):
         selected_section = CollapsibleSection("ВЫБРАННОЕ УСТРОЙСТВО", expanded=True)
         self.selected_label = QLabel("Устройство не выбрано")
         self.selected_label.setWordWrap(True)
+        # Имя устройства из импорта Tailscale задаёт владелец чужого узла.
+        self.selected_label.setTextFormat(Qt.TextFormat.PlainText)
         selected_section.add_widget(self.selected_label)
         self.terminal_button = QPushButton("Открыть терминал")
         self.terminal_button.clicked.connect(self.open_selected_terminal)
