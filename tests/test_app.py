@@ -549,6 +549,13 @@ class TailscaleImportFlowTests(unittest.TestCase):
 
         window = self._window()
         with (
+            # Клиент Tailscale на машине, где идут тесты, не установлен (в CI его
+            # нет) — без подмены пути импорт выходил на «Клиент Tailscale не
+            # найден» раньше подменённого subprocess.run.
+            patch(
+                "ven4control.app.tailscale_path",
+                return_value=r"C:\Program Files\Tailscale\tailscale.exe",
+            ),
             patch("ven4control.app.subprocess.run", return_value=completed),
             patch("ven4control.ssh_service.probe_device", probe),
             patch(
