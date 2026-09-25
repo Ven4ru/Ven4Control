@@ -292,7 +292,10 @@ class LogStreamWorker:
         command = build_stream_command(platform, self.source)
         self._emit(connected_marker(self.device.name, self.device.host))
         self._set_status(STATUS_STREAMING)
-        async with connection.create_process(command) as process:
+        # Строгое декодирование рвало бы соединение на первом байте не в
+        # UTF-8 (см. `_run`), а `logread -f` при переподключении выдаёт буфер
+        # заново — сессия уходила в вечный цикл разрывов на той же строке.
+        async with connection.create_process(command, errors="replace") as process:
             reader = asyncio.create_task(self._read_lines(process))
             snapshots = asyncio.create_task(self._snapshot_loop(connection))
             stopped = asyncio.create_task(self._stop.wait())

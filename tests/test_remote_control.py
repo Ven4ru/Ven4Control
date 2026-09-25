@@ -61,7 +61,7 @@ class FakeConnection:
         self.commands: list[str] = []
         self.closed = False
 
-    async def run(self, command: str, check: bool = False, timeout: int = 60):
+    async def run(self, command: str, check: bool = False, timeout: int = 60, **options):
         self.commands.append(command)
         for marker, stdout, status in self.replies:
             if marker in command:
@@ -939,8 +939,30 @@ class FailingConnection:
         self.stderr = stderr
         self.status = status
 
-    async def run(self, command: str, check: bool = False, timeout: int = 60):
+    async def run(self, command: str, check: bool = False, timeout: int = 60, **options):
         return SimpleNamespace(stdout="", stderr=self.stderr, exit_status=self.status)
+
+
+class RecordingConnection:
+    """Соединение, запоминающее параметры вызова `run`."""
+
+    def __init__(self) -> None:
+        self.options: dict[str, object] = {}
+
+    async def run(self, command: str, **options):
+        self.options = options
+        return SimpleNamespace(stdout="", stderr="", exit_status=0)
+
+
+class OutputDecodingTests(unittest.TestCase):
+    """Байт не в UTF-8 в выводе устройства не должен рвать соединение."""
+
+    def test_invalid_utf8_is_replaced_not_fatal(self) -> None:
+        # При строгом декодировании asyncssh закрывает всё соединение как
+        # ошибку протокола, а команда возвращает пустой вывод.
+        connection = RecordingConnection()
+        asyncio.run(_run(connection, "logread | tail -n 20"))
+        self.assertEqual("replace", connection.options.get("errors"))
 
 
 class SudoErrorTests(unittest.TestCase):

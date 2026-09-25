@@ -432,7 +432,14 @@ async def _run(
     check: bool = False,
 ) -> asyncssh.SSHCompletedProcess:
     try:
-        result = await connection.run(command, check=False, timeout=timeout)
+        # Без errors="replace" asyncssh декодирует вывод строго: один байт не
+        # в UTF-8 (журнал с бинарным мусором, имя Wi-Fi сети в чужой
+        # кодировке) — и он рвёт ВСЁ SSH-соединение как ошибку протокола, а
+        # команда при этом возвращает пустой вывод с нулевым кодом. Журнал
+        # тогда выглядел как «Записей не найдено», хотя записи были.
+        result = await connection.run(
+            command, check=False, timeout=timeout, errors="replace"
+        )
     except TimeoutError as error:
         raise RuntimeError(
             f"Устройство не ответило за {timeout} с, команда прервана."
