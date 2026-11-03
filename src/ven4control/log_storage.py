@@ -221,7 +221,10 @@ def _export_docx(
         part_index += 1
 
     for line in _iter_lines(parts):
-        document.add_paragraph(line)
+        # python-docx отвергает те же управляющие символы, что и openpyxl
+        # (ValueError «All strings must be XML compatible»): одна строка с
+        # ESC-последовательностью из вывода устройства срывала экспорт целиком.
+        document.add_paragraph(ILLEGAL_XLSX_CHARS.sub("", line))
         count += 1
         if count >= max_lines:
             flush()

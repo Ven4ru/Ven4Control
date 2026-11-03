@@ -223,6 +223,22 @@ class ExportTests(unittest.TestCase):
             self.assertEqual(2, len(first.paragraphs))
             self.assertIn("строка 0", first.paragraphs[0].text)
 
+    def test_docx_export_survives_control_characters(self) -> None:
+        """ESC-последовательность из вывода устройства не срывает экспорт."""
+        with tempfile.TemporaryDirectory() as temporary:
+            writer = RawLogWriter(Path(temporary) / "raw", "session")
+            writer.write_line("\x1b[31mошибка\x1b[0m\x07")
+            writer.close()
+            destination = Path(temporary) / "export"
+
+            created = export_session(writer.parts, destination, "docx", "session")
+
+            from docx import Document
+
+            text = Document(str(created[0])).paragraphs[0].text
+            self.assertIn("[31mошибка[0m", text)
+            self.assertNotIn("\x1b", text)
+
     def test_xlsx_export_splits_timestamp_into_columns(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             writer = self._session(temporary, lines=3)
