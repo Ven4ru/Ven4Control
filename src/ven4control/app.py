@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 from ven4control import __version__, autostart, scheduled_task
 from ven4control.ansi_screen import set_default_colors as set_terminal_colors
 from ven4control.control_dialog import DeviceControlDialog
+from ven4control.dashboard import DashboardDialog
 from ven4control.credentials import CredentialStore
 from ven4control.dialogs import AddDeviceDialog, InstructionsDialog, SettingsDialog
 from ven4control.log_sessions import preferred_export_format, session_manager
@@ -63,7 +64,7 @@ from ven4control.ssh_service import (
 )
 from ven4control.storage import DeviceStorage
 from ven4control.terminal_dialog import TerminalDialog
-from ven4control.theme import apply_theme
+from ven4control.theme import apply_theme, build_palette
 from ven4control.updates import (
     RELEASES_PAGE_URL,
     check_for_update,
@@ -508,9 +509,16 @@ class MainWindow(QMainWindow):
         refresh_button.clicked.connect(self.refresh_statuses)
         tailscale_button = QPushButton("Импорт Tailscale")
         tailscale_button.clicked.connect(self.import_tailscale)
+        dashboard_button = QPushButton("📊 Дашборд")
+        dashboard_button.setToolTip(
+            "Живые графики CPU и RAM на устройствах, отмеченных флажками "
+            "(или на выбранном, если флажков нет)"
+        )
+        dashboard_button.clicked.connect(self.open_dashboard)
         devices_section.add_widget(add_button)
         devices_section.add_widget(refresh_button)
         devices_section.add_widget(tailscale_button)
+        devices_section.add_widget(dashboard_button)
         sidebar_layout.addWidget(devices_section)
 
         sidebar_layout.addSpacing(10)
@@ -1610,6 +1618,33 @@ class MainWindow(QMainWindow):
                     "Подключение продолжится с проверкой ключа.",
                 )
         return credentials
+
+    def dashboard_devices(self) -> list[Device]:
+        """Устройства для дашборда: отмеченные флажками, иначе выбранное."""
+        devices = self.checked_devices()
+        if devices:
+            return devices
+        selected = self.selected_device()
+        return [selected] if selected is not None else []
+
+    def open_dashboard(self) -> None:
+        devices = self.dashboard_devices()
+        if not devices:
+            QMessageBox.information(
+                self,
+                "Дашборд",
+                "Отметьте флажками устройства, за которыми хотите следить, "
+                "или выберите одно устройство в списке.",
+            )
+            return
+        settings = load_settings()
+        dialog = DashboardDialog(
+            devices,
+            lambda device: self.device_credentials(device, silent=True),
+            build_palette(settings.theme),
+            self,
+        )
+        dialog.show()
 
     def control_selected_device(self) -> None:
         device = self.selected_device()
